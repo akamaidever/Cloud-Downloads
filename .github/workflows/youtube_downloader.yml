@@ -1,4 +1,4 @@
-# OctoFetch-YouTube-Version: 4
+# OctoFetch-YouTube-Version: 6
 
 name: 'YouTube Download Engine'
 
@@ -29,6 +29,16 @@ on:
         required: false
         type: string
         default: "45M"
+      cookies:
+        description: 'Optional YouTube cookies in Netscape format, base64-encoded. Only needed for age-restricted, members-only or region-locked videos.'
+        required: false
+        type: string
+        default: ''
+      max_mb:
+        description: 'Refuse videos larger than this many MB. 0 means no limit.'
+        required: false
+        type: string
+        default: '0'
 
 permissions:
   contents: write
@@ -62,94 +72,343 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y zip curl python3 python3-pip
-          pip3 install --quiet requests
-
-      - name: Resolve download link
-        id: retrieve
+          sudo apt-get install -y zip curl python3 python3-pip ffmpeg
+          # yt-dlp pins its own version so a new release cannot break a running
+          # job between the requirements being read and the install finishing.
+          pip3 install --quiet "yt-dlp==${YTDLP_VERSION}"
         env:
-          INPUT_URL: ${{ github.event.inputs.video_url }}
-          INPUT_FORMAT: ${{ github.event.inputs.output_format }}
-          INPUT_QUALITY: ${{ github.event.inputs.desired_quality }}
+          YTDLP_VERSION: 2026.08.19
+
+      # Downloads the video and records what it produced. The previous pair of
+      # steps resolved a temporary URL through a third-party converter and then
+      # curled it; that converter refused anything long with HTTP 403
+      # PREMIUM_REQUIRED and re-encoded what it did accept. yt-dlp reads the
+      # streams YouTube already publishes, so there is no length ceiling.
+      - name: Download video
+        env:
+          INPUT_URL: ${{{{ github.event.inputs.video_url }}}}
+          INPUT_FORMAT: ${{{{ github.event.inputs.output_format }}}}
+          INPUT_QUALITY: ${{{{ github.event.inputs.desired_quality }}}}
+          INPUT_COOKIES: ${{{{ inputs.cookies }}}}
+          INPUT_MAX_MB: ${{{{ inputs.max_mb }}}}
         run: |
           python3 << 'EOF'
-          import os, sys, time, re, requests
+          """Downloads a YouTube video with yt-dlp and records what it produced.
 
-          URL  = os.environ.get('INPUT_URL', '')
-          FMT  = os.environ.get('INPUT_FORMAT', 'mp4')
-          QUAL = os.environ.get('INPUT_QUALITY', '720p')
+          Replaces the hub.ytconvert.org converter, which refused anything longer than a
+          few minutes with 403 PREMIUM_REQUIRED. yt-dlp reads the streams YouTube already
+          publishes, so there is no length ceiling and no transcoding step to pay for.
 
-          is_audio = FMT == 'mp3'
-          if is_audio:
-              QUAL = QUAL if QUAL in ('64kbps','128kbps','192kbps','320kbps') else '192kbps'
-          else:
-              QUAL = QUAL if QUAL in ('360p','480p','720p','1080p') else '720p'
+          Writes .download_info with:
+              line 1: the absolute path of the downloaded file
+              line 2: the file name
+              line 3: the title
 
-          payload = {
-              "url": URL,
-              "os": "linux",
-              "output": {"type": "audio" if is_audio else "video", "format": FMT}
-          }
-          if is_audio:
-              payload["audio"] = {"bitrate": QUAL}
-          else:
-              payload["output"]["quality"] = QUAL
+          and the same values as GitHub outputs. Exit code 0 on success; 1 with an
+          ::error:: annotation on any refusal, so the runner log says what happened
+          instead of dying inside yt-dlp's own traceback.
+          """
 
-          s = requests.Session()
-          s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-          s.get("https://media.ytmp3.gg/")
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import time
 
-          resp = s.post("https://hub.ytconvert.org/api/download", json=payload, timeout=30)
-          resp.raise_for_status()
-          data = resp.json()
+          URL = os.environ.get("INPUT_URL", "").strip()
+          FMT = os.environ.get("INPUT_FORMAT", "mp4").strip().lower()
+          QUALITY = os.environ.get("INPUT_QUALITY", "720p").strip().lower()
+          COOKIES_B64 = os.environ.get("INPUT_COOKIES", "").strip()
+          CHUNK_LIMIT_MB = int(os.environ.get("INPUT_MAX_MB", "0") or 0)
 
-          status_url = data.get('statusUrl')
-          title = data.get('title', 'video')
+          # Set once the jar is written; read by die() so every exit path can clear it.
+          cookies_file = None
 
-          print(f"Waiting for conversion: {title}")
-          dl_url = None
-          for _ in range(150):
-              time.sleep(2)
-              r = s.get(status_url, timeout=20)
-              status = r.json()
-              if status.get('status') == 'completed':
-                  dl_url = status.get('downloadUrl')
-                  break
-              if status.get('status') == 'failed':
-                  print("::error::Server failed to prepare the video")
-                  sys.exit(1)
 
-          if not dl_url:
-              print("::error::Could not get download link")
+          def die(message, detail=""):
+              # A cookie jar is a live account credential. Every exit path has to clear it,
+              # not just the successful one, because the workspace is committed later in the
+              # workflow and a failure is exactly when nobody checks for leftovers.
+              if cookies_file and os.path.exists(cookies_file):
+                  try:
+                      os.remove(cookies_file)
+                      print("Removed the temporary cookie file.")
+                  except OSError:
+                      pass
+
+              if detail:
+                  print(f"::error::{message}")
+                  print(detail)
+              else:
+                  print(f"::error::{message}")
               sys.exit(1)
 
-          vid   = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', URL)
-          vid   = vid[1] if vid else 'unknown'
-          clean = re.sub(r'[^a-zA-Z0-9\-_()\[\]]', '_', title.replace(' ', '_'))
-          clean = re.sub(r'_+', '_', clean).strip('_')[:70] or vid
-          clean = clean.lstrip('-')
-          fname = f"{clean}_{vid}_{QUAL}.{FMT}"
 
-          with open(".download_info", "w", encoding="utf-8") as f:
-              f.write(f"{dl_url}\n{fname}\n{title}")
+          def quality_height(raw):
+              """'1080p' / '1080' / '1080 (Full HD)' -> 1080. Unknown -> 720."""
+              m = re.search(r"(\d{3,4})", raw or "")
+              if not m:
+                  return 720
+              value = int(m.group(1))
+              for floor in (2160, 1440, 1080, 720, 480, 360, 240, 144):
+                  if value >= floor:
+                      return floor
+              return 144
 
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"filename={fname}\n")
-              f.write(f"title={title}\n")
+
+          # ---------------------------------------------------------------- cookies ----
+          # Optional. Needed for age-restricted, members-only or region-locked videos, and
+          # for anything YouTube serves with the bot check rather than the video itself.
+          # Passed as base64 so the value never lands in the workflow file on disk.
+          if COOKIES_B64:
+              try:
+                  import base64
+
+                  raw = base64.b64decode(COOKIES_B64, validate=True).decode("utf-8")
+                  cookies_file = os.path.join(os.getcwd(), "yt_cookies.txt")
+                  with open(cookies_file, "w", encoding="utf-8", newline="\n") as fh:
+                      fh.write(raw if raw.endswith("\n") else raw + "\n")
+                  # The file is a full account credential. Do not leave it in the workspace
+                  # for the commit step that follows, and keep it out of the log.
+                  os.chmod(cookies_file, 0o600)
+                  print("Using the supplied YouTube cookies.")
+              except Exception as exc:
+                  die("The YouTube cookies could not be decoded; ignoring them.", repr(exc))
+
+          if not shutil.which("ffmpeg"):
+              die(
+                  "ffmpeg is not installed, so the separate video and audio streams cannot be "
+                  "joined. Install it with 'sudo apt-get install -y ffmpeg'."
+              )
+
+          if not URL:
+              die("No video URL was supplied.")
+
+          # ------------------------------------------------------------ format pick ----
+          is_audio = FMT in ("mp3", "m4a", "opus", "wav")
+          height = quality_height(QUALITY)
+
+          if is_audio:
+              # YouTube publishes audio as m4a/aac or opus. Handing back what YouTube serves
+              # is instant and lossless; forcing mp3 would mean an ffmpeg re-encode, which
+              # costs minutes on a long file and nothing else.
+              if FMT == "mp3":
+                  # yt-dlp extracts mp3 via ffmpeg post-processing.
+                  selector = "bestaudio/best"
+                  postprocess = ["--extract-audio", "--audio-format", "mp3"]
+                  final_ext = "mp3"
+              else:
+                  selector = f"bestaudio[ext={FMT}]/bestaudio/best"
+                  postprocess = []
+                  final_ext = FMT
+          else:
+              # Video and audio arrive as separate streams for essentially every modern
+              # upload, so a merge is required; ffmpeg is checked for above.
+              #
+              # The height cap matters on long videos: a 1h09m upload at 2160p is several GB,
+              # which does not fit a runner's disk and fails the job late. Prefer the closest
+              # format at or below the cap and fall back to whatever exists.
+              selector = (
+                  f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
+                  f"bestvideo[height<={height}]+bestaudio/"
+                  f"best[height<={height}]/"
+                  f"best"
+              )
+              postprocess = ["--merge-output-format", "mp4"]
+              final_ext = "mp4"
+
+          print(f"Fetching: {URL}")
+          print(f"Format  : {'audio' if is_audio else 'video'} up to {height}p" if not is_audio
+                else f"Format  : audio ({final_ext})")
+
+          cmd = [
+              sys.executable, "-m", "yt_dlp",
+              "--no-playlist",
+              "--no-warnings",
+              "--newline",
+              "--retries", "5",
+              "--fragment-retries", "5",
+              "--socket-timeout", "30",
+              "-f", selector,
+              "-o", "download.%(ext)s",
+          ]
+          if cookies_file:
+              cmd += ["--cookies", cookies_file]
+          if postprocess:
+              cmd += postprocess
+          cmd.append(URL)
+
+          print("Running yt-dlp...")
+          proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+          # The title is only known after a successful run, so it is asked for separately
+          # rather than parsed out of the progress output.
+          title = ""
+          try:
+              probe = subprocess.run(
+                  [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                   "--skip-download", "--print", "%(title)s", URL]
+                  + (["--cookies", cookies_file] if cookies_file else []),
+                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+              title = (probe.stdout or "").strip().splitlines()[0] if probe.stdout.strip() else ""
+          except Exception:
+              pass
+
+          video_id = "unknown"
+          m = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", URL)
+          if m:
+              video_id = m.group(1)
+
+          if proc.returncode != 0:
+              err = (proc.stderr or "").strip()
+              tail = "\n".join(err.splitlines()[-14:])
+
+              # These are refusals with nothing to retry. Say which one, in the user's terms.
+              if "Sign in to confirm you" in err or "confirm you are not a bot" in err:
+                  die(
+                      "YouTube asked yt-dlp to prove it is not a bot (HTTP 403). This happens on "
+                      "some runner IPs.",
+                      "Add your YouTube cookies in Settings so the download runs as your signed-in "
+                      "session.  " + tail,
+                  )
+              # A 403 on the media itself, after the format list resolved fine, is YouTube
+              # refusing the stream rather than the page. This is the case cookies exist for,
+              # and it reads as an opaque "Forbidden" otherwise.
+              if "403" in err and ("video data" in err or "fragment" in err or
+                                   "media" in err or "download" in err.lower()):
+                  if cookies_file:
+                      die("YouTube refused the video stream even with your cookies (HTTP 403). "
+                          "The cookies may have expired, or the account is not permitted to "
+                          "view this video.", tail)
+                  die("YouTube refused to serve the video stream (HTTP 403). This usually means "
+                      "the video is age-restricted, members-only or region-locked. Add your "
+                      "YouTube cookies in Settings so the download runs as your signed-in "
+                      "session.", tail)
+
+              if "Private video" in err:
+                  die("This video is private.", tail)
+              if "members-only" in err.lower() or "join this channel" in err.lower():
+                  die("This video is members-only. Supply your YouTube cookies to access it.", tail)
+              if "age-restricted" in err.lower() or "confirm your age" in err.lower():
+                  die("This video is age-restricted. Supply your YouTube cookies to access it.", tail)
+              # yt-dlp words the same refusal several ways depending on which extractor
+              # hit it first, and each needs saying differently: a dead link is not worth
+              # a cookie, a region block is.
+              if "This video is unavailable" in err:
+                  die("YouTube reports this video as unavailable. It was most likely deleted, "
+                      "or it is region-locked on the runner's IP.", tail)
+              if "is not available in your country" in err.lower() or \
+                 "blocked it in your country" in err.lower():
+                  die("This video is region-locked and the runner's IP cannot see it.", tail)
+              if "Video unavailable" in err or "not available" in err.lower():
+                  die("YouTube says this video is unavailable. It may have been removed, or it "
+                      "is region-locked on the runner.", tail)
+              if "Unable to download webpage" in err or "Unsupported URL" in err:
+                  die("That URL is not a YouTube video this tool can read. Check it in the app "
+                      "and paste the plain watch URL.", tail)
+              if "HTTP Error 429" in err or "Too Many Requests" in err:
+                  die("YouTube rate-limited the runner. Waiting and retrying the job usually "
+                      "clears this.", tail)
+              if "requested format is not available" in err.lower():
+                  die("YouTube published no stream at that quality for this video. Try a lower "
+                      "quality.", tail)
+              if "ffmpeg" in err.lower() and "not found" in err.lower():
+                  die("ffmpeg is required to join the video and audio streams.", tail)
+
+              # A stream-level 403 is often transient: YouTube hands out one and withdraws it,
+              # and the same request seconds later succeeds. Re-derive rather than telling the
+              # user to supply cookies for something that is not an access problem.
+              if "403" in err and ("video data" in err or "fragment" in err):
+                  print("The video stream was refused (403). Retrying from scratch...")
+                  for attempt in range(2):
+                      time.sleep(15 * (attempt + 1))
+                      retry = subprocess.run(cmd, capture_output=True, text=True,
+                                             encoding="utf-8", errors="replace")
+                      if retry.returncode == 0:
+                          err = ""
+                          break
+                      err = (retry.stderr or "").strip()
+                      tail = "\n".join(err.splitlines()[-14:])
+
+                  if not err:
+                      pass          # a retry succeeded; fall through to the result check
+                  elif "403" in err:
+                      die("YouTube kept refusing the video stream (HTTP 403) across three "
+                          "attempts. If the video is age-restricted, members-only or "
+                          "region-locked, add your YouTube cookies in Settings.", tail)
+
+              die(f"yt-dlp could not download this video (exit {proc.returncode}).", tail)
+
+          # ------------------------------------------------------------- the result ----
+          # The output name is not predictable: a merge leaves .mp4, audio extraction leaves
+          # the requested extension, and a plain pick leaves whatever was chosen.
+          candidates = [
+              os.path.join(".", f) for f in os.listdir(".")
+              if f.startswith("download.") and os.path.getsize(f) > 0
+          ]
+          if not candidates:
+              die("yt-dlp reported success but left no file behind.")
+
+          path = max(candidates, key=os.path.getsize)
+          size_mb = os.path.getsize(path) / 1048576
+
+          if size_mb < 0.01:
+              die(f"The downloaded file is empty ({path}).")
+
+          if CHUNK_LIMIT_MB and size_mb > CHUNK_LIMIT_MB:
+              die(
+                  f"The video is {size_mb:.0f} MB, over the {CHUNK_LIMIT_MB} MB limit this "
+                  f"server allows. Choose a lower quality."
+              )
+
+          if not title:
+              title = os.path.splitext(os.path.basename(path))[0]
+
+          # The name carries the quality, which the previous converter's did too, so the
+          # folder is self-describing in the app.
+          suffix = f"{height}p" if not is_audio else final_ext
+          clean = re.sub(r"[^A-Za-z0-9\-_()\[\]]", "_", title.replace(" ", "_"))
+          clean = re.sub(r"_+", "_", clean).strip("_")[:70] or video_id
+          clean = clean.lstrip("-")
+          filename = f"{clean}_{video_id}_{suffix}.{final_ext}"
+
+          # A retry of the same job lands on the same name, and os.rename refuses to
+          # overwrite on Windows. Remove the target first rather than failing there.
+          if os.path.exists(filename):
+              os.remove(filename)
+          os.rename(path, filename)
+          final = os.path.abspath(filename)
+
+          print(f"Downloaded: {filename} ({size_mb:.1f} MB)")
+
+          with open(".download_info", "w", encoding="utf-8") as fh:
+              fh.write(f"{final}\n{filename}\n{title}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"filename={filename}\n")
+              fh.write(f"title={title}\n")
+
+          # The cookie file is a live account credential: remove it before the commit step
+          # that follows, even though the workflow only commits .github/.
+          if cookies_file and os.path.exists(cookies_file):
+              os.remove(cookies_file)
+              print("Removed the temporary cookie file.")
           EOF
 
-      - name: Download File
+      - name: Stage the file
         run: |
-          DL_URL=$(head -1 .download_info)
+          set -euo pipefail
+          # .download_info holds: absolute path, file name, title.
+          FILE_PATH=$(head -1 .download_info)
           FILENAME=$(sed -n '2p' .download_info)
-          mkdir -p temp_download
-          echo "Downloading: $FILENAME"
-          curl -L --fail --retry 3 --progress-bar \
-            -o "temp_download/$FILENAME" "$DL_URL"
-          if [ ! -s "temp_download/$FILENAME" ]; then
-            echo "::error::Downloaded file is empty!"
+          if [ ! -s "$FILE_PATH" ]; then
+            echo "::error::Downloaded file is missing or empty: $FILE_PATH"
             exit 1
           fi
+          mkdir -p temp_download
+          mv "$FILE_PATH" "temp_download/$FILENAME"
 
       - name: Split and organize
         env:
