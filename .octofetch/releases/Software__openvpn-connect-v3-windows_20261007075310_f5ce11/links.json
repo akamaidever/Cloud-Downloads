@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "co-releases-v1-4457",
+  "folder": "Software__openvpn-connect-v3-windows_20261007075310_f5ce11",
+  "base_name": "Software__openvpn-connect-v3-windows_20261007075310_f5ce11.msi",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/co-releases-v1-4457",
+  "files": [
+    {
+      "name": "Software__openvpn-connect-v3-windows_20261007075310_f5ce11.msi",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/co-releases-v1-4457/Software__openvpn-connect-v3-windows_20261007075310_f5ce11.msi",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/617997154",
+      "id": 617997154,
+      "size": 125444096,
+      "download_count": 0
+    }
+  ]
+}
