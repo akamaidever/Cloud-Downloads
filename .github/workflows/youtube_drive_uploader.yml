@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeDrive-Version: 5
+# OctoFetch-YouTubeDrive-Version: 7
 
 name: 'YouTube → Drive Engine'
 
@@ -75,6 +75,15 @@ jobs:
         env:
           YTDLP_VERSION: 2026.08.19
 
+      # Health check: fail here with a clear message if the tools are not usable,
+      # rather than partway through a download.
+      - name: Verify YouTube tools
+        run: |
+          set -e
+          ffmpeg -version | head -n 1
+          python3 -m yt_dlp --version
+          python3 -c "import yt_dlp; print('yt_dlp import ok')"
+
       # Downloads the video and records what it produced. The previous pair of
       # steps resolved a temporary URL through a third-party converter and then
       # curled it; that converter refused anything long with HTTP 403
@@ -82,11 +91,11 @@ jobs:
       # streams YouTube already publishes, so there is no length ceiling.
       - name: Download video
         env:
-          INPUT_URL: ${{{{ github.event.inputs.video_url }}}}
-          INPUT_FORMAT: ${{{{ github.event.inputs.output_format }}}}
-          INPUT_QUALITY: ${{{{ github.event.inputs.desired_quality }}}}
-          INPUT_COOKIES: ${{{{ inputs.cookies }}}}
-          INPUT_MAX_MB: ${{{{ inputs.max_mb }}}}
+          INPUT_URL: ${{ github.event.inputs.video_url }}
+          INPUT_FORMAT: ${{ github.event.inputs.output_format }}
+          INPUT_QUALITY: ${{ github.event.inputs.desired_quality }}
+          INPUT_COOKIES: ${{ inputs.cookies }}
+          INPUT_MAX_MB: ${{ inputs.max_mb }}
         run: |
           python3 << 'EOF'
           """Downloads a YouTube video with yt-dlp and records what it produced.
