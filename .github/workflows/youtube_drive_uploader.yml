@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeDrive-Version: 15
+# OctoFetch-YouTubeDrive-Version: 16
 
 name: 'YouTube → Drive Engine'
 
@@ -81,7 +81,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y zip curl python3 python3-pip ffmpeg
-          pip3 install --quiet -U "yt-dlp[default]" bgutil-ytdlp-pot-provider
+          pip3 install --quiet -U "yt-dlp[default]" yt-dlp-ejs bgutil-ytdlp-pot-provider
+
+      - name: Install Deno Runtime
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
       # Health check: fail here with a clear message if the tools are not usable,
       # rather than partway through a download.
@@ -251,12 +256,22 @@ jobs:
                   "-f", selector,
                   "-o", "download.%(ext)s",
               ]
+              deno_bin = shutil.which("deno") or os.path.expanduser("~/.deno/bin/deno")
+              if os.path.exists(deno_bin) if isinstance(deno_bin, str) else False:
+                  c += ["--js-runtimes", f"deno:{deno_bin},node"]
+              elif shutil.which("node"):
+                  c += ["--js-runtimes", "node"]
               if cookie_path and os.path.exists(cookie_path):
                   c += ["--cookies", cookie_path]
               if postprocess:
                   c += postprocess
               c.append(URL)
-              return subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace")
+              res = subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace")
+              if res.returncode != 0 and not has_downloaded():
+                  err_tail = "\n".join((res.stderr or "").splitlines()[-10:])
+                  out_tail = "\n".join((res.stdout or "").splitlines()[-10:])
+                  print(f"::warning::Client [{client_list}] (cookies={bool(cookie_path)}) failed (exit {res.returncode}):\n{err_tail}\n{out_tail}")
+              return res
 
           def has_downloaded():
               return any(
@@ -362,9 +377,13 @@ jobs:
               fh.write(f"filename={filename}\n")
               fh.write(f"title={title}\n")
 
-          if cookies_file and os.path.exists(cookies_file):
-              os.remove(cookies_file)
-              print("Removed the temporary cookie file.")
+          for tmp_c in [cookies_file, clean_cookie_file, os.path.join(os.getcwd(), "yt_cookies_stripped.txt")]:
+              if tmp_c and os.path.exists(tmp_c):
+                  try:
+                      os.remove(tmp_c)
+                  except OSError:
+                      pass
+          print("Cleaned up temporary cookie files.")
           EOF
 
       - name: Stage the file
