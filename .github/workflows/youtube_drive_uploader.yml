@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeDrive-Version: 14
+# OctoFetch-YouTubeDrive-Version: 15
 
 name: 'YouTube → Drive Engine'
 
@@ -247,7 +247,7 @@ jobs:
                   "--fragment-retries", "5",
                   "--socket-timeout", "30",
                   "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-                  "--extractor-args", f"youtube:player_client={client_list};player_skip=configs",
+                  "--extractor-args", f"youtube:player_client={client_list}",
                   "-f", selector,
                   "-o", "download.%(ext)s",
               ]
@@ -265,27 +265,27 @@ jobs:
               )
 
           proc = None
-          # Strategy 1: Attempt with user cookies + PO-Token
+          # Strategy 1: Attempt with user cookies (web_embedded is proven to work without GVS PO-Token block)
           if clean_cookie_file and os.path.exists(clean_cookie_file):
-              print("Attempting download with cookies (web, mweb)...")
-              proc = run_ytdlp("web,mweb", cookie_path=clean_cookie_file)
+              print("Attempting download with cookies (web_embedded, web_creator, mweb)...")
+              proc = run_ytdlp("web_embedded,web_creator,mweb", cookie_path=clean_cookie_file)
               if proc.returncode != 0 and not has_downloaded():
-                  print("Retrying with cookies (ios, android)...")
-                  proc = run_ytdlp("ios,android", cookie_path=clean_cookie_file)
+                  print("Retrying with cookies (android, ios)...")
+                  proc = run_ytdlp("android,ios", cookie_path=clean_cookie_file)
 
               # Strategy 1b: If cookies failed due to rotation or challenge, auto-strip volatile tokens
               if proc.returncode != 0 and not has_downloaded():
                   stripped_cookie_file = os.path.join(os.getcwd(), "yt_cookies_stripped.txt")
                   if sanitize_cookie_file(cookies_file, stripped_cookie_file, strip_rolling=True):
                       print("Detected possible expired rolling tokens. Retrying with auto-repaired cookies...")
-                      proc = run_ytdlp("web,mweb", cookie_path=stripped_cookie_file)
+                      proc = run_ytdlp("web_embedded,web_creator,mweb", cookie_path=stripped_cookie_file)
                       if proc.returncode != 0 and not has_downloaded():
-                          proc = run_ytdlp("ios,android", cookie_path=stripped_cookie_file)
+                          proc = run_ytdlp("android,ios", cookie_path=stripped_cookie_file)
 
           # Strategy 2: If cookies failed or weren't provided, seamlessly fallback to anonymous PO-Token
           if (not proc or proc.returncode != 0) and not has_downloaded():
-              print("Session challenged or no cookies. Running yt-dlp with PO-Token (web, mweb)...")
-              proc = run_ytdlp("web,mweb", cookie_path=None)
+              print("Cookie session challenged or no cookies. Running yt-dlp with PO-Token (web_embedded, web_creator)...")
+              proc = run_ytdlp("web_embedded,web_creator,mweb", cookie_path=None)
 
           if (not proc or proc.returncode != 0) and not has_downloaded():
               print("Retrying yt-dlp with PO-Token (android, ios)...")
@@ -294,10 +294,6 @@ jobs:
           if (not proc or proc.returncode != 0) and not has_downloaded():
               print("Retrying yt-dlp with PO-Token (tv, tv_embedded)...")
               proc = run_ytdlp("tv,tv_embedded", cookie_path=None)
-
-          if (not proc or proc.returncode != 0) and not has_downloaded():
-              print("Retrying yt-dlp with PO-Token (android_vr, web_creator)...")
-              proc = run_ytdlp("android_vr,web_creator", cookie_path=None)
 
           candidates = [
               os.path.join(".", f) for f in os.listdir(".")
@@ -335,7 +331,7 @@ jobs:
               probe = subprocess.run(
                   [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
                    "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-                   "--extractor-args", "youtube:player_client=mweb,tv,web_safari;player_skip=configs",
+                   "--extractor-args", "youtube:player_client=web_embedded,web_creator,mweb",
                    "--skip-download", "--print", "%(title)s", URL],
                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
               if probe.returncode == 0 and probe.stdout.strip():
