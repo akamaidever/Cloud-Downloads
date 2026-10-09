@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeDrive-Version: 7
+# OctoFetch-YouTubeDrive-Version: 8
 
 name: 'YouTube → Drive Engine'
 
@@ -68,12 +68,8 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y zip curl python3 python3-pip ffmpeg
-          # yt-dlp pins its own version so a new release cannot break a running
-          # job between the requirements being read and the install finishing.
-          pip3 install --quiet "yt-dlp==${YTDLP_VERSION}"
-        env:
-          YTDLP_VERSION: 2026.08.19
+          sudo apt-get install -y zip curl python3 python3-pip python3-requests ffmpeg
+          pip3 install --quiet -U "yt-dlp[default]" requests
 
       # Health check: fail here with a clear message if the tools are not usable,
       # rather than partway through a download.
@@ -228,25 +224,102 @@ jobs:
           print(f"Format  : {'audio' if is_audio else 'video'} up to {height}p" if not is_audio
                 else f"Format  : audio ({final_ext})")
 
-          cmd = [
-              sys.executable, "-m", "yt_dlp",
-              "--no-playlist",
-              "--no-warnings",
-              "--newline",
-              "--retries", "5",
-              "--fragment-retries", "5",
-              "--socket-timeout", "30",
-              "-f", selector,
-              "-o", "download.%(ext)s",
-          ]
-          if cookies_file:
-              cmd += ["--cookies", cookies_file]
-          if postprocess:
-              cmd += postprocess
-          cmd.append(URL)
+          def run_ytdlp_cmd(client_list, with_cookies=True):
+              c = [
+                  sys.executable, "-m", "yt_dlp",
+                  "--no-playlist",
+                  "--no-warnings",
+                  "--newline",
+                  "--retries", "5",
+                  "--fragment-retries", "5",
+                  "--socket-timeout", "30",
+                  "--extractor-args", f"youtube:player_client={client_list};player_skip=configs",
+                  "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                  "-f", selector,
+                  "-o", "download.%(ext)s",
+              ]
+              if with_cookies and cookies_file:
+                  c += ["--cookies", cookies_file]
+              if postprocess:
+                  c += postprocess
+              c.append(URL)
+              return subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
-          print("Running yt-dlp...")
-          proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+          print("Running yt-dlp (Strategy 1: Mobile clients)...")
+          proc = run_ytdlp_cmd("ios,android,web_embedded", with_cookies=True)
+
+          if proc.returncode != 0:
+              err_low = (proc.stderr or "").lower()
+              if "reload" in err_low or "bot" in err_low or "sign in" in err_low or "403" in err_low:
+                  if cookies_file:
+                      print("Cookies triggered bot/reload challenge. Retrying without cookies (Strategy 2)...")
+                      proc = run_ytdlp_cmd("ios,android,web_embedded", with_cookies=False)
+
+          if proc.returncode != 0:
+              err_low = (proc.stderr or "").lower()
+              if "reload" in err_low or "403" in err_low or "bot" in err_low or proc.returncode != 0:
+                  print("Retrying with Android Creator & Safari clients (Strategy 3)...")
+                  proc = run_ytdlp_cmd("android_creator,ios,mweb,web_safari", with_cookies=False)
+
+          # Strategy 4: High-speed Converter API fallback if all direct extractions were blocked
+          candidates_check = [
+              os.path.join(".", f) for f in os.listdir(".")
+              if f.startswith("download.") and os.path.getsize(f) > 0
+          ]
+          if proc.returncode != 0 and not candidates_check:
+              print("Direct stream extraction blocked by YouTube on runner IP. Engaging Converter Engine Fallback (Strategy 4)...")
+              try:
+                  import requests as rq
+                  api_endpoint = 'https://hub.ytconvert.org/api/download'
+                  conv_headers = {
+                      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                      'Accept': 'application/json',
+                      'Referer': 'https://media.ytmp3.gg/',
+                      'Content-Type': 'application/json',
+                      'Origin': 'https://media.ytmp3.gg'
+                  }
+                  target_type = 'audio' if is_audio else 'video'
+                  target_fmt = final_ext if final_ext in ('mp3', 'mp4') else ('mp3' if is_audio else 'mp4')
+                  payload = {
+                      'url': URL,
+                      'os': 'linux',
+                      'output': {'type': target_type, 'format': target_fmt}
+                  }
+                  if is_audio:
+                      payload['audio'] = {'bitrate': f"{QUALITY}k" if 'k' not in str(QUALITY) else str(QUALITY)}
+                  else:
+                      payload['output']['quality'] = f"{height}p"
+
+                  rr = rq.post(api_endpoint, json=payload, headers=conv_headers, timeout=25)
+                  if rr.status_code == 200:
+                      d_resp = rr.json()
+                      status_url = d_resp.get('statusUrl')
+                      if status_url:
+                          print("Converter job dispatched. Waiting for conversion...")
+                          for _ in range(60):
+                              time.sleep(2)
+                              sr = rq.get(status_url, headers=conv_headers, timeout=15)
+                              if sr.status_code == 200:
+                                  sd = sr.json()
+                                  st = sd.get('status', '')
+                                  if st == 'completed':
+                                      dl_url = sd.get('downloadUrl')
+                                      if dl_url:
+                                          print("Downloading stream from converter...")
+                                          r_stream = rq.get(dl_url, headers=conv_headers, stream=True, timeout=600)
+                                          if r_stream.status_code == 200:
+                                              out_file = f"download.{final_ext}"
+                                              with open(out_file, 'wb') as out_fh:
+                                                  for chunk in r_stream.iter_content(65536):
+                                                      out_fh.write(chunk)
+                                              print("Converter download completed successfully.")
+                                              proc = subprocess.CompletedProcess([], 0, stdout="Downloaded via converter API", stderr="")
+                                              break
+                                  elif st in ('failed', 'error'):
+                                      print(f"Converter reported failure: {sd.get('message', '')}")
+                                      break
+              except Exception as fallback_exc:
+                  print(f"Converter fallback error: {fallback_exc}")
 
           # The title is only known after a successful run, so it is asked for separately
           # rather than parsed out of the progress output.
@@ -254,9 +327,16 @@ jobs:
           try:
               probe = subprocess.run(
                   [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                   "--extractor-args", "youtube:player_client=ios,android,web_embedded;player_skip=configs",
                    "--skip-download", "--print", "%(title)s", URL]
                   + (["--cookies", cookies_file] if cookies_file else []),
-                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+              if probe.returncode != 0 and cookies_file:
+                  probe = subprocess.run(
+                      [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                       "--extractor-args", "youtube:player_client=ios,android,web_embedded;player_skip=configs",
+                       "--skip-download", "--print", "%(title)s", URL],
+                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
               title = (probe.stdout or "").strip().splitlines()[0] if probe.stdout.strip() else ""
           except Exception:
               pass
@@ -266,7 +346,12 @@ jobs:
           if m:
               video_id = m.group(1)
 
-          if proc.returncode != 0:
+          candidates = [
+              os.path.join(".", f) for f in os.listdir(".")
+              if f.startswith("download.") and os.path.getsize(f) > 0
+          ]
+
+          if proc.returncode != 0 and not candidates:
               err = (proc.stderr or "").strip()
               tail = "\n".join(err.splitlines()[-14:])
 
