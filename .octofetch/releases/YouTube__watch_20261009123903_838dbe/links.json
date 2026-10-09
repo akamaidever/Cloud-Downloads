@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "co-releases-v1-7772",
+  "folder": "YouTube__watch_20261009123903_838dbe",
+  "base_name": "download_PgtwdQ6BSdw_480p.mp4",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/co-releases-v1-7772",
+  "files": [
+    {
+      "name": "download_PgtwdQ6BSdw_480p.mp4",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/co-releases-v1-7772/download_PgtwdQ6BSdw_480p.mp4",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/624939882",
+      "id": 624939882,
+      "size": 34705967,
+      "download_count": 0
+    }
+  ]
+}
