@@ -1,4 +1,4 @@
-# OctoFetch-YouTube-Version: 16
+# OctoFetch-YouTube-Version: 17
 
 name: 'YouTube Download Engine'
 
@@ -260,10 +260,11 @@ jobs:
                   "-o", "download.%(ext)s",
               ]
               deno_bin = shutil.which("deno") or os.path.expanduser("~/.deno/bin/deno")
-              if os.path.exists(deno_bin) if isinstance(deno_bin, str) else False:
-                  c += ["--js-runtimes", f"deno:{deno_bin},node"]
-              elif shutil.which("node"):
-                  c += ["--js-runtimes", "node"]
+              if isinstance(deno_bin, str) and os.path.exists(deno_bin):
+                  c += ["--js-runtimes", f"deno:{deno_bin}"]
+              else:
+                  c += ["--js-runtimes", "deno"]
+              c += ["--js-runtimes", "node", "--remote-components", "ejs:github"]
               if cookie_path and os.path.exists(cookie_path):
                   c += ["--cookies", cookie_path]
               if postprocess:
@@ -348,6 +349,7 @@ jobs:
           try:
               probe = subprocess.run(
                   [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                   "--js-runtimes", "deno", "--js-runtimes", "node", "--remote-components", "ejs:github",
                    "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
                    "--extractor-args", "youtube:player_client=web_embedded,web_creator,mweb",
                    "--skip-download", "--print", "%(title)s", URL],
