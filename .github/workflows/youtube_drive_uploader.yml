@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeDrive-Version: 17
+# OctoFetch-YouTubeDrive-Version: 18
 
 name: 'YouTube → Drive Engine'
 
@@ -81,7 +81,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y zip curl python3 python3-pip ffmpeg
-          pip3 install --quiet -U "yt-dlp[default]" yt-dlp-ejs bgutil-ytdlp-pot-provider
+          pip3 install --quiet -U "yt-dlp[default]" yt-dlp-ejs bgutil-ytdlp-pot-provider google-api-python-client google-auth google-auth-httplib2
 
       - name: Install Deno Runtime
         run: |
