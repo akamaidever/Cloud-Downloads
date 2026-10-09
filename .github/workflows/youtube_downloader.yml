@@ -1,4 +1,4 @@
-# OctoFetch-YouTube-Version: 12
+# OctoFetch-YouTube-Version: 13
 
 name: 'YouTube Download Engine'
 
@@ -71,7 +71,15 @@ jobs:
 
       - name: Start PO-Token Provider (Docker)
         run: |
-          docker run --name bgutil-provider -d --restart always -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider || true
+          docker run --name bgutil-provider -d --restart always -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:4416/ping >/dev/null 2>&1; then
+              echo "PO-Token Provider is ready."
+              break
+            fi
+            echo "Waiting for PO-Token Provider..."
+            sleep 1
+          done
 
       - name: Install Dependencies
         run: |
@@ -87,14 +95,15 @@ jobs:
           ffmpeg -version | head -n 1
           python3 -m yt_dlp --version
           python3 -c "import yt_dlp; print('yt_dlp import ok')"
+          curl -s http://127.0.0.1:4416/ping || echo "Warning: POT provider ping failed"
 
       - name: Download video
         env:
           INPUT_URL: ${{ github.event.inputs.video_url }}
           INPUT_FORMAT: ${{ github.event.inputs.output_format }}
           INPUT_QUALITY: ${{ github.event.inputs.desired_quality }}
-          INPUT_COOKIES: ${{ inputs.cookies }}
-          INPUT_MAX_MB: ${{ inputs.max_mb }}
+          INPUT_COOKIES: ${{ github.event.inputs.cookies }}
+          INPUT_MAX_MB: ${{ github.event.inputs.max_mb }}
         run: |
           python3 << 'EOF'
           """Downloads a YouTube video using pure yt-dlp with PO-Token Provider.
@@ -156,6 +165,8 @@ jobs:
                   print("Using the supplied YouTube cookies.")
               except Exception as exc:
                   print(f"::warning::Cookies decode warning: {exc}")
+          else:
+              print("No YouTube cookies supplied via INPUT_COOKIES.")
 
           if not URL:
               die("No video URL was supplied.")
@@ -192,14 +203,12 @@ jobs:
               c = [
                   sys.executable, "-m", "yt_dlp",
                   "--no-playlist",
-                  "--no-warnings",
                   "--newline",
                   "--retries", "5",
                   "--fragment-retries", "5",
                   "--socket-timeout", "30",
                   "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
                   "--extractor-args", f"youtube:player_client={client_list};player_skip=configs",
-                  "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                   "-f", selector,
                   "-o", "download.%(ext)s",
               ]
@@ -212,27 +221,28 @@ jobs:
 
           proc = None
           if cookies_file:
-              print("Running yt-dlp with PO-Token & cookies (mweb, tv, web_safari)...")
-              proc = run_ytdlp("mweb,tv,web_safari,web", use_cookie=True)
+              print("Running yt-dlp with PO-Token & cookies (web, mweb)...")
+              proc = run_ytdlp("web,mweb", use_cookie=True)
               if proc.returncode != 0:
-                  print("Retrying yt-dlp with PO-Token & cookies (iOS & Android clients)...")
-                  proc = run_ytdlp("ios,android,web_embedded", use_cookie=True)
+                  print(f"Attempt with cookies failed. Stderr tail: {proc.stderr[-300:] if proc.stderr else ''}")
+                  print("Retrying yt-dlp with PO-Token & cookies (ios, android)...")
+                  proc = run_ytdlp("ios,android", use_cookie=True)
 
           if not proc or proc.returncode != 0:
-              print("Running yt-dlp with PO-Token (mweb, tv, web_safari)...")
-              proc = run_ytdlp("mweb,tv,web_safari,web", use_cookie=False)
+              print("Running yt-dlp with PO-Token (web, mweb)...")
+              proc = run_ytdlp("web,mweb", use_cookie=False)
 
           if proc.returncode != 0:
-              print("Retrying yt-dlp with PO-Token (android_vr, tv_embedded, web_creator)...")
-              proc = run_ytdlp("android_vr,tv_embedded,web_creator", use_cookie=False)
+              print("Retrying yt-dlp with PO-Token (android, ios)...")
+              proc = run_ytdlp("android,ios", use_cookie=False)
 
           if proc.returncode != 0:
-              print("Retrying yt-dlp with PO-Token (android_creator, ios, mweb)...")
-              proc = run_ytdlp("android_creator,ios,mweb", use_cookie=False)
+              print("Retrying yt-dlp with PO-Token (tv, tv_embedded)...")
+              proc = run_ytdlp("tv,tv_embedded", use_cookie=False)
 
           if proc.returncode != 0:
-              print("Retrying yt-dlp with PO-Token (ios, android, web_embedded)...")
-              proc = run_ytdlp("ios,android,web_embedded", use_cookie=False)
+              print("Retrying yt-dlp with PO-Token (android_vr, web_creator)...")
+              proc = run_ytdlp("android_vr,web_creator", use_cookie=False)
 
           candidates = [
               os.path.join(".", f) for f in os.listdir(".")
