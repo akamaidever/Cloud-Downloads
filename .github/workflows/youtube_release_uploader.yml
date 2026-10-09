@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeRelease-Version: 8
+# OctoFetch-YouTubeRelease-Version: 9
 
 name: 'YouTube to GitHub Release Engine'
 
@@ -190,7 +190,7 @@ jobs:
               import requests as rq
               api_endpoint = 'https://hub.ytconvert.org/api/download'
               conv_headers = {
-                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                  'User-Agent': 'Mozilla/5.0',
                   'Accept': 'application/json',
                   'Referer': 'https://media.ytmp3.gg/',
                   'Content-Type': 'application/json',
@@ -209,45 +209,54 @@ jobs:
               else:
                   payload['output']['quality'] = f"{height}p"
 
-              for attempt in range(2):
+              for attempt in range(3):
+                  if attempt > 0:
+                      print(f"Converter retry {attempt}/3...")
+                      time.sleep(3)
                   try:
-                      r = rq.post(api_endpoint, json=payload, headers=conv_headers, timeout=20)
-                      if r.status_code == 200:
-                          d_data = r.json()
-                          status_url = d_data.get('statusUrl')
-                          if status_url:
-                              print(f"Job dispatched (attempt {attempt+1}). Waiting for stream...")
-                              for _ in range(75):
-                                  time.sleep(2)
-                                  sr = rq.get(status_url, headers=conv_headers, timeout=15)
-                                  if sr.status_code == 200:
-                                      s_data = sr.json()
-                                      status = s_data.get('status', '')
-                                      if status == 'completed':
-                                          dl_url = s_data.get('downloadUrl')
-                                          title = s_data.get('title', '')
-                                          if dl_url:
-                                              print(f"Downloading stream: {title or video_id}...")
-                                              out_file = f"download.{final_ext}"
-                                              r_stream = rq.get(dl_url, headers=conv_headers, stream=True, timeout=600)
-                                              if r_stream.status_code == 200:
-                                                  with open(out_file, 'wb') as out_fh:
-                                                      for chunk in r_stream.iter_content(65536):
-                                                          out_fh.write(chunk)
-                                                  if os.path.exists(out_file) and os.path.getsize(out_file) > 1024:
-                                                      print("Downloaded successfully via Converter Engine.")
-                                                      download_success = True
-                                                      break
-                                      elif status in ('failed', 'error'):
-                                          print(f"Converter reported error: {s_data.get('message', '')}")
-                                          break
-                          if download_success:
-                              break
+                      r = rq.post(api_endpoint, json=payload, headers=conv_headers, timeout=25)
+                      if r.status_code != 200:
+                          print(f"Converter POST status {r.status_code}: {r.text[:200]}")
+                          continue
+                      d_data = r.json()
+                      status_url = d_data.get('statusUrl')
+                      if not status_url:
+                          print(f"No statusUrl received: {d_data}")
+                          continue
+                      print(f"Job dispatched. Polling conversion progress...")
+                      for poll_idx in range(90):
+                          time.sleep(2)
+                          sr = rq.get(status_url, headers=conv_headers, timeout=15)
+                          if sr.status_code == 200:
+                              s_data = sr.json()
+                              status = s_data.get('status', '')
+                              prog = s_data.get('progress', '')
+                              if status == 'completed':
+                                  dl_url = s_data.get('downloadUrl')
+                                  title = s_data.get('title', '')
+                                  if dl_url:
+                                      print(f"Downloading stream: {title or video_id}...")
+                                      out_file = f"download.{final_ext}"
+                                      r_stream = rq.get(dl_url, headers=conv_headers, stream=True, timeout=600)
+                                      if r_stream.status_code == 200:
+                                          with open(out_file, 'wb') as out_fh:
+                                              for chunk in r_stream.iter_content(65536):
+                                                  out_fh.write(chunk)
+                                          if os.path.exists(out_file) and os.path.getsize(out_file) > 1024:
+                                              print("Downloaded successfully via Converter Engine.")
+                                              download_success = True
+                                              break
+                              elif status in ('failed', 'error'):
+                                  print(f"Converter reported error: {s_data.get('message', '')}")
+                                  break
+                          elif sr.status_code != 200:
+                              print(f"Poll status code: {sr.status_code}")
+                      if download_success:
+                          break
                   except Exception as ex:
-                      print(f"Converter attempt {attempt+1} error: {ex}")
-                      time.sleep(2)
+                      print(f"Converter attempt {attempt+1} exception: {ex}")
           except Exception as ex:
-              print(f"Converter engine unavailable: {ex}")
+              print(f"Converter engine error: {ex}")
 
           # =========================================================================
           # Strategy 2: Direct yt-dlp Extraction (Fallback & Cookie/Private Handler)
