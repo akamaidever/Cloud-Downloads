@@ -1,4 +1,4 @@
-# OctoFetch-YouTube-Version: 13
+# OctoFetch-YouTube-Version: 14
 
 name: 'YouTube Download Engine'
 
@@ -130,14 +130,17 @@ jobs:
           CHUNK_LIMIT_MB = int(os.environ.get("INPUT_MAX_MB", "0") or 0)
 
           cookies_file = None
+          clean_cookie_file = None
+          stripped_cookie_file = None
 
           def die(message, detail=""):
-              if cookies_file and os.path.exists(cookies_file):
-                  try:
-                      os.remove(cookies_file)
-                      print("Removed the temporary cookie file.")
-                  except OSError:
-                      pass
+              for cf in (cookies_file, clean_cookie_file, stripped_cookie_file):
+                  if cf and os.path.exists(cf):
+                      try:
+                          os.remove(cf)
+                      except OSError:
+                          pass
+              print("Cleaned up temporary cookie files.")
               if detail:
                   print(f"::error::{message}")
                   print(detail)
@@ -155,6 +158,41 @@ jobs:
                       return floor
               return 144
 
+          def sanitize_cookie_file(src_path, dst_path, strip_rolling=False):
+              if not src_path or not os.path.exists(src_path):
+                  return False
+              with open(src_path, "r", encoding="utf-8", errors="replace") as fh:
+                  lines = fh.readlines()
+              out_lines = [
+                  "# Netscape HTTP Cookie File\n",
+                  "# https://curl.haxx.se/rfc/cookie_spec.html\n",
+                  "# This is a generated file! Do not edit.\n\n"
+              ]
+              kept = 0
+              for line in lines:
+                  s = line.strip()
+                  if not s or s.startswith("# Netscape") or s.startswith("# http") or s.startswith("# This is"):
+                      continue
+                  if s.startswith("#") and not s.startswith("#HttpOnly_"):
+                      continue
+                  parts = s.split("\t")
+                  if len(parts) < 7:
+                      parts = re.split(r"\s+", s)
+                  if len(parts) >= 7:
+                      cname = parts[5].strip()
+                      # If strip_rolling is True, eliminate volatile session tokens (*PSIDTS, *SIDCC)
+                      if strip_rolling and any(k in cname for k in ("PSIDTS", "SIDCC")):
+                          continue
+                      cleaned_row = "\t".join([p.strip() for p in parts[:6]] + ["\t".join(parts[6:]).strip()])
+                      out_lines.append(cleaned_row + "\n")
+                      kept += 1
+              if kept > 0:
+                  with open(dst_path, "w", encoding="utf-8", newline="\n") as fh:
+                      fh.writelines(out_lines)
+                  os.chmod(dst_path, 0o600)
+                  return True
+              return False
+
           if COOKIES_B64:
               try:
                   raw = base64.b64decode(COOKIES_B64, validate=True).decode("utf-8")
@@ -162,7 +200,12 @@ jobs:
                   with open(cookies_file, "w", encoding="utf-8", newline="\n") as fh:
                       fh.write(raw if raw.endswith("\n") else raw + "\n")
                   os.chmod(cookies_file, 0o600)
-                  print("Using the supplied YouTube cookies.")
+                  clean_cookie_file = os.path.join(os.getcwd(), "yt_cookies_clean.txt")
+                  if sanitize_cookie_file(cookies_file, clean_cookie_file, strip_rolling=False):
+                      print("Validated and formatted YouTube cookies.")
+                  else:
+                      clean_cookie_file = cookies_file
+                      print("Using raw YouTube cookies.")
               except Exception as exc:
                   print(f"::warning::Cookies decode warning: {exc}")
           else:
@@ -199,7 +242,7 @@ jobs:
               )
               postprocess = ["--merge-output-format", "mp4"]
 
-          def run_ytdlp(client_list, use_cookie):
+          def run_ytdlp(client_list, cookie_path=None):
               c = [
                   sys.executable, "-m", "yt_dlp",
                   "--no-playlist",
@@ -212,37 +255,53 @@ jobs:
                   "-f", selector,
                   "-o", "download.%(ext)s",
               ]
-              if use_cookie and cookies_file and os.path.exists(cookies_file):
-                  c += ["--cookies", cookies_file]
+              if cookie_path and os.path.exists(cookie_path):
+                  c += ["--cookies", cookie_path]
               if postprocess:
                   c += postprocess
               c.append(URL)
               return subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
+          def has_downloaded():
+              return any(
+                  f.startswith("download.") and os.path.getsize(f) > 0
+                  for f in os.listdir(".")
+              )
+
           proc = None
-          if cookies_file:
-              print("Running yt-dlp with PO-Token & cookies (web, mweb)...")
-              proc = run_ytdlp("web,mweb", use_cookie=True)
-              if proc.returncode != 0:
-                  print(f"Attempt with cookies failed. Stderr tail: {proc.stderr[-300:] if proc.stderr else ''}")
-                  print("Retrying yt-dlp with PO-Token & cookies (ios, android)...")
-                  proc = run_ytdlp("ios,android", use_cookie=True)
+          # Strategy 1: Attempt with user cookies + PO-Token
+          if clean_cookie_file and os.path.exists(clean_cookie_file):
+              print("Attempting download with cookies (web, mweb)...")
+              proc = run_ytdlp("web,mweb", cookie_path=clean_cookie_file)
+              if proc.returncode != 0 and not has_downloaded():
+                  print("Retrying with cookies (ios, android)...")
+                  proc = run_ytdlp("ios,android", cookie_path=clean_cookie_file)
 
-          if not proc or proc.returncode != 0:
-              print("Running yt-dlp with PO-Token (web, mweb)...")
-              proc = run_ytdlp("web,mweb", use_cookie=False)
+              # Strategy 1b: If cookies failed due to rotation or challenge, auto-strip volatile tokens
+              if proc.returncode != 0 and not has_downloaded():
+                  stripped_cookie_file = os.path.join(os.getcwd(), "yt_cookies_stripped.txt")
+                  if sanitize_cookie_file(cookies_file, stripped_cookie_file, strip_rolling=True):
+                      print("Detected possible expired rolling tokens. Retrying with auto-repaired cookies...")
+                      proc = run_ytdlp("web,mweb", cookie_path=stripped_cookie_file)
+                      if proc.returncode != 0 and not has_downloaded():
+                          proc = run_ytdlp("ios,android", cookie_path=stripped_cookie_file)
 
-          if proc.returncode != 0:
+          # Strategy 2: If cookies failed or weren't provided, seamlessly fallback to anonymous PO-Token
+          if (not proc or proc.returncode != 0) and not has_downloaded():
+              print("Session challenged or no cookies. Running yt-dlp with PO-Token (web, mweb)...")
+              proc = run_ytdlp("web,mweb", cookie_path=None)
+
+          if (not proc or proc.returncode != 0) and not has_downloaded():
               print("Retrying yt-dlp with PO-Token (android, ios)...")
-              proc = run_ytdlp("android,ios", use_cookie=False)
+              proc = run_ytdlp("android,ios", cookie_path=None)
 
-          if proc.returncode != 0:
+          if (not proc or proc.returncode != 0) and not has_downloaded():
               print("Retrying yt-dlp with PO-Token (tv, tv_embedded)...")
-              proc = run_ytdlp("tv,tv_embedded", use_cookie=False)
+              proc = run_ytdlp("tv,tv_embedded", cookie_path=None)
 
-          if proc.returncode != 0:
+          if (not proc or proc.returncode != 0) and not has_downloaded():
               print("Retrying yt-dlp with PO-Token (android_vr, web_creator)...")
-              proc = run_ytdlp("android_vr,web_creator", use_cookie=False)
+              proc = run_ytdlp("android_vr,web_creator", cookie_path=None)
 
           candidates = [
               os.path.join(".", f) for f in os.listdir(".")
