@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "co-releases-v1-6933",
+  "folder": "YouTube__watch_20261009135403_70c74d",
+  "base_name": "download_A66TYFdz8YA_1080p.mp4",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/co-releases-v1-6933",
+  "files": [
+    {
+      "name": "download_A66TYFdz8YA_1080p.mp4",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/co-releases-v1-6933/download_A66TYFdz8YA_1080p.mp4",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/625122955",
+      "id": 625122955,
+      "size": 12028031,
+      "download_count": 0
+    }
+  ]
+}
