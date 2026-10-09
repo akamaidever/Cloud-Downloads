@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeRelease-Version: 15
+# OctoFetch-YouTubeRelease-Version: 16
 
 name: 'YouTube to GitHub Release Engine'
 
@@ -98,12 +98,12 @@ jobs:
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
 
-      # Health check: fail here with a clear message if the tools are not usable,
-      # rather than partway through a download.
       - name: Verify YouTube tools
         run: |
           set -e
+          export PATH="$HOME/.deno/bin:$PATH"
           ffmpeg -version | head -n 1
+          deno --version || true
           python3 -m yt_dlp --version
           python3 -c "import yt_dlp; print('yt_dlp import ok')"
           curl -s http://127.0.0.1:4416/ping || echo "Warning: POT provider ping failed"
@@ -267,10 +267,11 @@ jobs:
                   "-o", "download.%(ext)s",
               ]
               deno_bin = shutil.which("deno") or os.path.expanduser("~/.deno/bin/deno")
-              if os.path.exists(deno_bin) if isinstance(deno_bin, str) else False:
-                  c += ["--js-runtimes", f"deno:{deno_bin},node"]
-              elif shutil.which("node"):
-                  c += ["--js-runtimes", "node"]
+              if isinstance(deno_bin, str) and os.path.exists(deno_bin):
+                  c += ["--js-runtimes", f"deno:{deno_bin}"]
+              else:
+                  c += ["--js-runtimes", "deno"]
+              c += ["--js-runtimes", "node", "--remote-components", "ejs:github"]
               if cookie_path and os.path.exists(cookie_path):
                   c += ["--cookies", cookie_path]
               if postprocess:
@@ -355,6 +356,7 @@ jobs:
           try:
               probe = subprocess.run(
                   [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                   "--js-runtimes", "deno", "--js-runtimes", "node", "--remote-components", "ejs:github",
                    "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
                    "--extractor-args", "youtube:player_client=web_embedded,web_creator,mweb",
                    "--skip-download", "--print", "%(title)s", URL],
