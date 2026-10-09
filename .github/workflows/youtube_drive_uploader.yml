@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeDrive-Version: 8
+# OctoFetch-YouTubeDrive-Version: 9
 
 name: 'YouTube → Drive Engine'
 
@@ -94,22 +94,15 @@ jobs:
           INPUT_MAX_MB: ${{ inputs.max_mb }}
         run: |
           python3 << 'EOF'
-          """Downloads a YouTube video with yt-dlp and records what it produced.
-
-          Replaces the hub.ytconvert.org converter, which refused anything longer than a
-          few minutes with 403 PREMIUM_REQUIRED. yt-dlp reads the streams YouTube already
-          publishes, so there is no length ceiling and no transcoding step to pay for.
+          """Downloads a YouTube video using Hybrid Engine (Converter API + yt-dlp fallback).
 
           Writes .download_info with:
               line 1: the absolute path of the downloaded file
               line 2: the file name
               line 3: the title
-
-          and the same values as GitHub outputs. Exit code 0 on success; 1 with an
-          ::error:: annotation on any refusal, so the runner log says what happened
-          instead of dying inside yt-dlp's own traceback.
           """
 
+          import base64
           import json
           import os
           import re
@@ -124,21 +117,15 @@ jobs:
           COOKIES_B64 = os.environ.get("INPUT_COOKIES", "").strip()
           CHUNK_LIMIT_MB = int(os.environ.get("INPUT_MAX_MB", "0") or 0)
 
-          # Set once the jar is written; read by die() so every exit path can clear it.
           cookies_file = None
 
-
           def die(message, detail=""):
-              # A cookie jar is a live account credential. Every exit path has to clear it,
-              # not just the successful one, because the workspace is committed later in the
-              # workflow and a failure is exactly when nobody checks for leftovers.
               if cookies_file and os.path.exists(cookies_file):
                   try:
                       os.remove(cookies_file)
                       print("Removed the temporary cookie file.")
                   except OSError:
                       pass
-
               if detail:
                   print(f"::error::{message}")
                   print(detail)
@@ -146,9 +133,7 @@ jobs:
                   print(f"::error::{message}")
               sys.exit(1)
 
-
           def quality_height(raw):
-              """'1080p' / '1080' / '1080 (Full HD)' -> 1080. Unknown -> 720."""
               m = re.search(r"(\d{3,4})", raw or "")
               if not m:
                   return 720
@@ -158,288 +143,190 @@ jobs:
                       return floor
               return 144
 
-
-          # ---------------------------------------------------------------- cookies ----
-          # Optional. Needed for age-restricted, members-only or region-locked videos, and
-          # for anything YouTube serves with the bot check rather than the video itself.
-          # Passed as base64 so the value never lands in the workflow file on disk.
           if COOKIES_B64:
               try:
-                  import base64
-
                   raw = base64.b64decode(COOKIES_B64, validate=True).decode("utf-8")
                   cookies_file = os.path.join(os.getcwd(), "yt_cookies.txt")
                   with open(cookies_file, "w", encoding="utf-8", newline="\n") as fh:
                       fh.write(raw if raw.endswith("\n") else raw + "\n")
-                  # The file is a full account credential. Do not leave it in the workspace
-                  # for the commit step that follows, and keep it out of the log.
                   os.chmod(cookies_file, 0o600)
                   print("Using the supplied YouTube cookies.")
               except Exception as exc:
-                  die("The YouTube cookies could not be decoded; ignoring them.", repr(exc))
-
-          if not shutil.which("ffmpeg"):
-              die(
-                  "ffmpeg is not installed, so the separate video and audio streams cannot be "
-                  "joined. Install it with 'sudo apt-get install -y ffmpeg'."
-              )
+                  print(f"::warning::Cookies decode warning: {exc}")
 
           if not URL:
               die("No video URL was supplied.")
 
-          # ------------------------------------------------------------ format pick ----
           is_audio = FMT in ("mp3", "m4a", "opus", "wav")
           height = quality_height(QUALITY)
+          final_ext = "mp3" if FMT == "mp3" else ("m4a" if is_audio else "mp4")
 
-          if is_audio:
-              # YouTube publishes audio as m4a/aac or opus. Handing back what YouTube serves
-              # is instant and lossless; forcing mp3 would mean an ffmpeg re-encode, which
-              # costs minutes on a long file and nothing else.
-              if FMT == "mp3":
-                  # yt-dlp extracts mp3 via ffmpeg post-processing.
-                  selector = "bestaudio/best"
-                  postprocess = ["--extract-audio", "--audio-format", "mp3"]
-                  final_ext = "mp3"
-              else:
-                  selector = f"bestaudio[ext={FMT}]/bestaudio/best"
-                  postprocess = []
-                  final_ext = FMT
-          else:
-              # Video and audio arrive as separate streams for essentially every modern
-              # upload, so a merge is required; ffmpeg is checked for above.
-              #
-              # The height cap matters on long videos: a 1h09m upload at 2160p is several GB,
-              # which does not fit a runner's disk and fails the job late. Prefer the closest
-              # format at or below the cap and fall back to whatever exists.
-              selector = (
-                  f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
-                  f"bestvideo[height<={height}]+bestaudio/"
-                  f"best[height<={height}]/"
-                  f"best"
-              )
-              postprocess = ["--merge-output-format", "mp4"]
-              final_ext = "mp4"
-
-          print(f"Fetching: {URL}")
-          print(f"Format  : {'audio' if is_audio else 'video'} up to {height}p" if not is_audio
-                else f"Format  : audio ({final_ext})")
-
-          def run_ytdlp_cmd(client_list, with_cookies=True):
-              c = [
-                  sys.executable, "-m", "yt_dlp",
-                  "--no-playlist",
-                  "--no-warnings",
-                  "--newline",
-                  "--retries", "5",
-                  "--fragment-retries", "5",
-                  "--socket-timeout", "30",
-                  "--extractor-args", f"youtube:player_client={client_list};player_skip=configs",
-                  "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                  "-f", selector,
-                  "-o", "download.%(ext)s",
-              ]
-              if with_cookies and cookies_file:
-                  c += ["--cookies", cookies_file]
-              if postprocess:
-                  c += postprocess
-              c.append(URL)
-              return subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace")
-
-          print("Running yt-dlp (Strategy 1: Mobile clients)...")
-          proc = run_ytdlp_cmd("ios,android,web_embedded", with_cookies=True)
-
-          if proc.returncode != 0:
-              err_low = (proc.stderr or "").lower()
-              if "reload" in err_low or "bot" in err_low or "sign in" in err_low or "403" in err_low:
-                  if cookies_file:
-                      print("Cookies triggered bot/reload challenge. Retrying without cookies (Strategy 2)...")
-                      proc = run_ytdlp_cmd("ios,android,web_embedded", with_cookies=False)
-
-          if proc.returncode != 0:
-              err_low = (proc.stderr or "").lower()
-              if "reload" in err_low or "403" in err_low or "bot" in err_low or proc.returncode != 0:
-                  print("Retrying with Android Creator & Safari clients (Strategy 3)...")
-                  proc = run_ytdlp_cmd("android_creator,ios,mweb,web_safari", with_cookies=False)
-
-          # Strategy 4: High-speed Converter API fallback if all direct extractions were blocked
-          candidates_check = [
-              os.path.join(".", f) for f in os.listdir(".")
-              if f.startswith("download.") and os.path.getsize(f) > 0
-          ]
-          if proc.returncode != 0 and not candidates_check:
-              print("Direct stream extraction blocked by YouTube on runner IP. Engaging Converter Engine Fallback (Strategy 4)...")
-              try:
-                  import requests as rq
-                  api_endpoint = 'https://hub.ytconvert.org/api/download'
-                  conv_headers = {
-                      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                      'Accept': 'application/json',
-                      'Referer': 'https://media.ytmp3.gg/',
-                      'Content-Type': 'application/json',
-                      'Origin': 'https://media.ytmp3.gg'
-                  }
-                  target_type = 'audio' if is_audio else 'video'
-                  target_fmt = final_ext if final_ext in ('mp3', 'mp4') else ('mp3' if is_audio else 'mp4')
-                  payload = {
-                      'url': URL,
-                      'os': 'linux',
-                      'output': {'type': target_type, 'format': target_fmt}
-                  }
-                  if is_audio:
-                      payload['audio'] = {'bitrate': f"{QUALITY}k" if 'k' not in str(QUALITY) else str(QUALITY)}
-                  else:
-                      payload['output']['quality'] = f"{height}p"
-
-                  rr = rq.post(api_endpoint, json=payload, headers=conv_headers, timeout=25)
-                  if rr.status_code == 200:
-                      d_resp = rr.json()
-                      status_url = d_resp.get('statusUrl')
-                      if status_url:
-                          print("Converter job dispatched. Waiting for conversion...")
-                          for _ in range(60):
-                              time.sleep(2)
-                              sr = rq.get(status_url, headers=conv_headers, timeout=15)
-                              if sr.status_code == 200:
-                                  sd = sr.json()
-                                  st = sd.get('status', '')
-                                  if st == 'completed':
-                                      dl_url = sd.get('downloadUrl')
-                                      if dl_url:
-                                          print("Downloading stream from converter...")
-                                          r_stream = rq.get(dl_url, headers=conv_headers, stream=True, timeout=600)
-                                          if r_stream.status_code == 200:
-                                              out_file = f"download.{final_ext}"
-                                              with open(out_file, 'wb') as out_fh:
-                                                  for chunk in r_stream.iter_content(65536):
-                                                      out_fh.write(chunk)
-                                              print("Converter download completed successfully.")
-                                              proc = subprocess.CompletedProcess([], 0, stdout="Downloaded via converter API", stderr="")
-                                              break
-                                  elif st in ('failed', 'error'):
-                                      print(f"Converter reported failure: {sd.get('message', '')}")
-                                      break
-              except Exception as fallback_exc:
-                  print(f"Converter fallback error: {fallback_exc}")
-
-          # The title is only known after a successful run, so it is asked for separately
-          # rather than parsed out of the progress output.
-          title = ""
-          try:
-              probe = subprocess.run(
-                  [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-                   "--extractor-args", "youtube:player_client=ios,android,web_embedded;player_skip=configs",
-                   "--skip-download", "--print", "%(title)s", URL]
-                  + (["--cookies", cookies_file] if cookies_file else []),
-                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-              if probe.returncode != 0 and cookies_file:
-                  probe = subprocess.run(
-                      [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-                       "--extractor-args", "youtube:player_client=ios,android,web_embedded;player_skip=configs",
-                       "--skip-download", "--print", "%(title)s", URL],
-                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-              title = (probe.stdout or "").strip().splitlines()[0] if probe.stdout.strip() else ""
-          except Exception:
-              pass
-
-          video_id = "unknown"
-          m = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", URL)
+          video_id = "video"
+          m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})", URL)
           if m:
               video_id = m.group(1)
 
-          candidates = [
-              os.path.join(".", f) for f in os.listdir(".")
-              if f.startswith("download.") and os.path.getsize(f) > 0
-          ]
+          print(f"Fetching: {URL}")
+          print(f"Format  : {'audio (' + final_ext + ')' if is_audio else 'video up to ' + str(height) + 'p'}")
 
-          if proc.returncode != 0 and not candidates:
-              err = (proc.stderr or "").strip()
-              tail = "\n".join(err.splitlines()[-14:])
+          download_success = False
+          title = ""
 
-              # These are refusals with nothing to retry. Say which one, in the user's terms.
-              if "Sign in to confirm you" in err or "confirm you are not a bot" in err:
-                  die(
-                      "YouTube asked yt-dlp to prove it is not a bot (HTTP 403). This happens on "
-                      "some runner IPs.",
-                      "Add your YouTube cookies in Settings so the download runs as your signed-in "
-                      "session.  " + tail,
+          # =========================================================================
+          # Strategy 1: High-Speed Dedicated Converter API (Bypasses Bot Block)
+          # =========================================================================
+          print("Attempting Download via High-Speed Converter Engine (Strategy 1)...")
+          try:
+              import requests as rq
+              api_endpoint = 'https://hub.ytconvert.org/api/download'
+              conv_headers = {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                  'Accept': 'application/json',
+                  'Referer': 'https://media.ytmp3.gg/',
+                  'Content-Type': 'application/json',
+                  'Origin': 'https://media.ytmp3.gg'
+              }
+              target_type = 'audio' if is_audio else 'video'
+              target_fmt = 'mp3' if is_audio else 'mp4'
+              payload = {
+                  'url': URL,
+                  'os': 'linux',
+                  'output': {'type': target_type, 'format': target_fmt}
+              }
+              if is_audio:
+                  q_audio = str(QUALITY).replace('p', '').replace('k', '')
+                  payload['audio'] = {'bitrate': f"{q_audio}k" if q_audio.isdigit() else "192k"}
+              else:
+                  payload['output']['quality'] = f"{height}p"
+
+              for attempt in range(2):
+                  try:
+                      r = rq.post(api_endpoint, json=payload, headers=conv_headers, timeout=20)
+                      if r.status_code == 200:
+                          d_data = r.json()
+                          status_url = d_data.get('statusUrl')
+                          if status_url:
+                              print(f"Job dispatched (attempt {attempt+1}). Waiting for stream...")
+                              for _ in range(75):
+                                  time.sleep(2)
+                                  sr = rq.get(status_url, headers=conv_headers, timeout=15)
+                                  if sr.status_code == 200:
+                                      s_data = sr.json()
+                                      status = s_data.get('status', '')
+                                      if status == 'completed':
+                                          dl_url = s_data.get('downloadUrl')
+                                          title = s_data.get('title', '')
+                                          if dl_url:
+                                              print(f"Downloading stream: {title or video_id}...")
+                                              out_file = f"download.{final_ext}"
+                                              r_stream = rq.get(dl_url, headers=conv_headers, stream=True, timeout=600)
+                                              if r_stream.status_code == 200:
+                                                  with open(out_file, 'wb') as out_fh:
+                                                      for chunk in r_stream.iter_content(65536):
+                                                          out_fh.write(chunk)
+                                                  if os.path.exists(out_file) and os.path.getsize(out_file) > 1024:
+                                                      print("Downloaded successfully via Converter Engine.")
+                                                      download_success = True
+                                                      break
+                                      elif status in ('failed', 'error'):
+                                          print(f"Converter reported error: {s_data.get('message', '')}")
+                                          break
+                          if download_success:
+                              break
+                  except Exception as ex:
+                      print(f"Converter attempt {attempt+1} error: {ex}")
+                      time.sleep(2)
+          except Exception as ex:
+              print(f"Converter engine unavailable: {ex}")
+
+          # =========================================================================
+          # Strategy 2: Direct yt-dlp Extraction (Fallback & Cookie/Private Handler)
+          # =========================================================================
+          if not download_success:
+              print("Engaging yt-dlp Direct Stream Engine (Strategy 2)...")
+              if is_audio:
+                  if FMT == "mp3":
+                      selector = "bestaudio/best"
+                      postprocess = ["--extract-audio", "--audio-format", "mp3"]
+                  else:
+                      selector = f"bestaudio[ext={FMT}]/bestaudio/best"
+                      postprocess = []
+              else:
+                  selector = (
+                      f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
+                      f"bestvideo[height<={height}]+bestaudio/"
+                      f"best[height<={height}]/"
+                      f"best"
                   )
-              # A 403 on the media itself, after the format list resolved fine, is YouTube
-              # refusing the stream rather than the page. This is the case cookies exist for,
-              # and it reads as an opaque "Forbidden" otherwise.
-              if "403" in err and ("video data" in err or "fragment" in err or
-                                   "media" in err or "download" in err.lower()):
-                  if cookies_file:
-                      die("YouTube refused the video stream even with your cookies (HTTP 403). "
-                          "The cookies may have expired, or the account is not permitted to "
-                          "view this video.", tail)
-                  die("YouTube refused to serve the video stream (HTTP 403). This usually means "
-                      "the video is age-restricted, members-only or region-locked. Add your "
-                      "YouTube cookies in Settings so the download runs as your signed-in "
-                      "session.", tail)
+                  postprocess = ["--merge-output-format", "mp4"]
 
-              if "Private video" in err:
-                  die("This video is private.", tail)
-              if "members-only" in err.lower() or "join this channel" in err.lower():
-                  die("This video is members-only. Supply your YouTube cookies to access it.", tail)
-              if "age-restricted" in err.lower() or "confirm your age" in err.lower():
-                  die("This video is age-restricted. Supply your YouTube cookies to access it.", tail)
-              # yt-dlp words the same refusal several ways depending on which extractor
-              # hit it first, and each needs saying differently: a dead link is not worth
-              # a cookie, a region block is.
-              if "This video is unavailable" in err:
-                  die("YouTube reports this video as unavailable. It was most likely deleted, "
-                      "or it is region-locked on the runner's IP.", tail)
-              if "is not available in your country" in err.lower() or \
-                 "blocked it in your country" in err.lower():
-                  die("This video is region-locked and the runner's IP cannot see it.", tail)
-              if "Video unavailable" in err or "not available" in err.lower():
-                  die("YouTube says this video is unavailable. It may have been removed, or it "
-                      "is region-locked on the runner.", tail)
-              if "Unable to download webpage" in err or "Unsupported URL" in err:
-                  die("That URL is not a YouTube video this tool can read. Check it in the app "
-                      "and paste the plain watch URL.", tail)
-              if "HTTP Error 429" in err or "Too Many Requests" in err:
-                  die("YouTube rate-limited the runner. Waiting and retrying the job usually "
-                      "clears this.", tail)
-              if "requested format is not available" in err.lower():
-                  die("YouTube published no stream at that quality for this video. Try a lower "
-                      "quality.", tail)
-              if "ffmpeg" in err.lower() and "not found" in err.lower():
-                  die("ffmpeg is required to join the video and audio streams.", tail)
+              def run_ytdlp(client_list, use_cookie):
+                  c = [
+                      sys.executable, "-m", "yt_dlp",
+                      "--no-playlist",
+                      "--no-warnings",
+                      "--newline",
+                      "--retries", "5",
+                      "--fragment-retries", "5",
+                      "--socket-timeout", "30",
+                      "--extractor-args", f"youtube:player_client={client_list};player_skip=configs",
+                      "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                      "-f", selector,
+                      "-o", "download.%(ext)s",
+                  ]
+                  if use_cookie and cookies_file and os.path.exists(cookies_file):
+                      c += ["--cookies", cookies_file]
+                  if postprocess:
+                      c += postprocess
+                  c.append(URL)
+                  return subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
-              # A stream-level 403 is often transient: YouTube hands out one and withdraws it,
-              # and the same request seconds later succeeds. Re-derive rather than telling the
-              # user to supply cookies for something that is not an access problem.
-              if "403" in err and ("video data" in err or "fragment" in err):
-                  print("The video stream was refused (403). Retrying from scratch...")
-                  for attempt in range(2):
-                      time.sleep(15 * (attempt + 1))
-                      retry = subprocess.run(cmd, capture_output=True, text=True,
-                                             encoding="utf-8", errors="replace")
-                      if retry.returncode == 0:
-                          err = ""
-                          break
-                      err = (retry.stderr or "").strip()
-                      tail = "\n".join(err.splitlines()[-14:])
+              proc = None
+              if cookies_file:
+                  print("Trying yt-dlp with cookies (TV & Embedded clients)...")
+                  proc = run_ytdlp("tv_embedded,android_vr,mweb", use_cookie=True)
+                  if proc.returncode != 0:
+                      print("Trying yt-dlp with cookies (iOS & Android clients)...")
+                      proc = run_ytdlp("ios,android,web_embedded", use_cookie=True)
 
-                  if not err:
-                      pass          # a retry succeeded; fall through to the result check
-                  elif "403" in err:
-                      die("YouTube kept refusing the video stream (HTTP 403) across three "
-                          "attempts. If the video is age-restricted, members-only or "
-                          "region-locked, add your YouTube cookies in Settings.", tail)
+              if not proc or proc.returncode != 0:
+                  print("Trying yt-dlp without cookies (TV & Android VR clients)...")
+                  proc = run_ytdlp("tv_embedded,android_vr,mweb", use_cookie=False)
 
-              die(f"yt-dlp could not download this video (exit {proc.returncode}).", tail)
+              if proc.returncode != 0:
+                  print("Trying yt-dlp without cookies (Android Creator & Safari clients)...")
+                  proc = run_ytdlp("android_creator,ios,mweb,web_safari", use_cookie=False)
 
-          # ------------------------------------------------------------- the result ----
-          # The output name is not predictable: a merge leaves .mp4, audio extraction leaves
-          # the requested extension, and a plain pick leaves whatever was chosen.
+              candidates = [
+                  os.path.join(".", f) for f in os.listdir(".")
+                  if f.startswith("download.") and os.path.getsize(f) > 0
+              ]
+              if candidates:
+                  download_success = True
+              else:
+                  err = (proc.stderr or "").strip() if proc else "No output from downloader"
+                  tail = "\n".join(err.splitlines()[-14:])
+                  if "Sign in to confirm you" in err or "confirm you are not a bot" in err:
+                      die("YouTube asked to confirm you are not a bot (HTTP 403).", tail)
+                  if "Private video" in err:
+                      die("This video is private.", tail)
+                  if "members-only" in err.lower() or "join this channel" in err.lower():
+                      die("This video is members-only. Supply valid YouTube cookies in Settings.", tail)
+                  if "age-restricted" in err.lower() or "confirm your age" in err.lower():
+                      die("This video is age-restricted. Supply valid YouTube cookies in Settings.", tail)
+                  if "403" in err:
+                      die("YouTube refused to serve the video stream (HTTP 403).", tail)
+                  die(f"Downloader could not fetch this video.", tail)
+
+          # =========================================================================
+          # Finalizing Download File & Outputs
+          # =========================================================================
           candidates = [
               os.path.join(".", f) for f in os.listdir(".")
               if f.startswith("download.") and os.path.getsize(f) > 0
           ]
           if not candidates:
-              die("yt-dlp reported success but left no file behind.")
+              die("Download finished but no valid file was produced.")
 
           path = max(candidates, key=os.path.getsize)
           size_mb = os.path.getsize(path) / 1048576
@@ -454,18 +341,26 @@ jobs:
               )
 
           if not title:
+              try:
+                  probe = subprocess.run(
+                      [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                       "--extractor-args", "youtube:player_client=tv_embedded,android_vr,mweb;player_skip=configs",
+                       "--skip-download", "--print", "%(title)s", URL],
+                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+                  if probe.returncode == 0 and probe.stdout.strip():
+                      title = probe.stdout.strip().splitlines()[0]
+              except Exception:
+                  pass
+
+          if not title:
               title = os.path.splitext(os.path.basename(path))[0]
 
-          # The name carries the quality, which the previous converter's did too, so the
-          # folder is self-describing in the app.
           suffix = f"{height}p" if not is_audio else final_ext
           clean = re.sub(r"[^A-Za-z0-9\-_()\[\]]", "_", title.replace(" ", "_"))
           clean = re.sub(r"_+", "_", clean).strip("_")[:70] or video_id
           clean = clean.lstrip("-")
           filename = f"{clean}_{video_id}_{suffix}.{final_ext}"
 
-          # A retry of the same job lands on the same name, and os.rename refuses to
-          # overwrite on Windows. Remove the target first rather than failing there.
           if os.path.exists(filename):
               os.remove(filename)
           os.rename(path, filename)
@@ -480,8 +375,6 @@ jobs:
               fh.write(f"filename={filename}\n")
               fh.write(f"title={title}\n")
 
-          # The cookie file is a live account credential: remove it before the commit step
-          # that follows, even though the workflow only commits .github/.
           if cookies_file and os.path.exists(cookies_file):
               os.remove(cookies_file)
               print("Removed the temporary cookie file.")
