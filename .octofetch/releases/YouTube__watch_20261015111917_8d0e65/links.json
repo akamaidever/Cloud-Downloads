@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "co-releases-v1-2163",
+  "folder": "YouTube__watch_20261015111917_8d0e65",
+  "base_name": "download_bkUxj623WHM_1080p.mp4",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/co-releases-v1-2163",
+  "files": [
+    {
+      "name": "download_bkUxj623WHM_1080p.mp4",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/co-releases-v1-2163/download_bkUxj623WHM_1080p.mp4",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/643631447",
+      "id": 643631447,
+      "size": 1626044990,
+      "download_count": 0
+    }
+  ]
+}
