@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "co-releases-v1-2698",
+  "folder": "YouTube__watch_20261017184219_387a2e",
+  "base_name": "خطرناک_ترین_مسابقه_کومان_SkGcDzwbIO4_720p.mp4",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/co-releases-v1-2698",
+  "files": [
+    {
+      "name": "_._._._SkGcDzwbIO4_720p.mp4",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/co-releases-v1-2698/_._._._SkGcDzwbIO4_720p.mp4",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/651278574",
+      "id": 651278574,
+      "size": 85968010,
+      "download_count": 0
+    }
+  ]
+}
