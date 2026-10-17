@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeDrive-Version: 19
+# OctoFetch-YouTubeDrive-Version: 20
 
 name: 'YouTube → Drive Engine'
 
@@ -224,6 +224,19 @@ jobs:
           if m:
               video_id = m.group(1)
 
+          # Early title probe so we always have the real title even before downloading
+          initial_title = ""
+          try:
+              probe_init = subprocess.run(
+                  [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                   "--skip-download", "--print", "%(title)s", URL],
+                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+              if probe_init.returncode == 0 and probe_init.stdout.strip():
+                  initial_title = probe_init.stdout.strip().splitlines()[0]
+                  print(f"Title   : {initial_title}")
+          except Exception:
+              pass
+
           print(f"Fetching: {URL}")
           print(f"Format  : {'audio (' + final_ext + ')' if is_audio else 'video up to ' + str(height) + 'p'}")
 
@@ -236,14 +249,14 @@ jobs:
                   postprocess = []
           else:
               selector = (
-                  f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
                   f"bestvideo[height<={height}]+bestaudio/"
                   f"best[height<={height}]/"
+                  f"bestvideo+bestaudio/"
                   f"best"
               )
               postprocess = ["--merge-output-format", "mp4"]
 
-          def run_ytdlp(client_list, cookie_path=None):
+          def run_ytdlp(client_list=None, cookie_path=None):
               c = [
                   sys.executable, "-m", "yt_dlp",
                   "--no-playlist",
@@ -252,7 +265,10 @@ jobs:
                   "--fragment-retries", "5",
                   "--socket-timeout", "30",
                   "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-                  "--extractor-args", f"youtube:player_client={client_list}",
+              ]
+              if client_list:
+                  c += ["--extractor-args", f"youtube:player_client={client_list}"]
+              c += [
                   "-f", selector,
                   "-o", "download.%(ext)s",
               ]
@@ -271,7 +287,7 @@ jobs:
               if res.returncode != 0 and not has_downloaded():
                   err_tail = "\n".join((res.stderr or "").splitlines()[-10:])
                   out_tail = "\n".join((res.stdout or "").splitlines()[-10:])
-                  print(f"::warning::Client [{client_list}] (cookies={bool(cookie_path)}) failed (exit {res.returncode}):\n{err_tail}\n{out_tail}")
+                  print(f"::warning::Client [{client_list or 'default'}] (cookies={bool(cookie_path)}) failed (exit {res.returncode}):\n{err_tail}\n{out_tail}")
               return res
 
           def is_download_file(name):
@@ -305,16 +321,18 @@ jobs:
 
           strategies = []
           if clean_cookie_file and os.path.exists(clean_cookie_file):
-              strategies.append(("cookies: web_embedded,web_creator,mweb", "web_embedded,web_creator,mweb", clean_cookie_file))
-              strategies.append(("cookies: android,ios", "android,ios", clean_cookie_file))
+              strategies.append(("cookies: default", None, clean_cookie_file))
+              strategies.append(("cookies: web,web_creator", "web,web_creator", clean_cookie_file))
               stripped_cookie_file = os.path.join(os.getcwd(), "yt_cookies_stripped.txt")
               if sanitize_cookie_file(cookies_file, stripped_cookie_file, strip_rolling=True):
-                  strategies.append(("stripped cookies: web_embedded,web_creator,mweb", "web_embedded,web_creator,mweb", stripped_cookie_file))
-                  strategies.append(("stripped cookies: android,ios", "android,ios", stripped_cookie_file))
-              strategies.append(("cookies: tv,tv_embedded", "tv,tv_embedded", clean_cookie_file))
-          strategies.append(("anonymous: web_embedded,web_creator,mweb", "web_embedded,web_creator,mweb", None))
-          strategies.append(("anonymous: android,ios", "android,ios", None))
-          strategies.append(("anonymous: tv,tv_embedded", "tv,tv_embedded", None))
+                  strategies.append(("stripped cookies: default", None, stripped_cookie_file))
+                  strategies.append(("stripped cookies: web,web_creator", "web,web_creator", stripped_cookie_file))
+              strategies.append(("cookies: ios,web", "ios,web", clean_cookie_file))
+              strategies.append(("cookies: web_embedded,mweb", "web_embedded,mweb", clean_cookie_file))
+          strategies.append(("anonymous: default", None, None))
+          strategies.append(("anonymous: web,web_creator", "web,web_creator", None))
+          strategies.append(("anonymous: ios,web", "ios,web", None))
+          strategies.append(("anonymous: web_embedded,mweb", "web_embedded,mweb", None))
 
           accepted_path = None
           accepted_client = None
@@ -341,7 +359,7 @@ jobs:
                   accepted_path, accepted_client, actual_height = candidate, client_list, seen_height
                   print(f"Quality OK: real {seen_height}p >= requested {height}p. Stopping strategy chain.")
                   break
-              print(f"::warning::Client [{client_list}] delivered only {seen_height or 'unknown'}p, requested {height}p. Trying next strategy...")
+              print(f"::warning::Client [{client_list or 'default'}] delivered only {seen_height or 'unknown'}p, requested {height}p. Trying next strategy...")
               parked = os.path.join(".", f"fallback_{len(fallbacks) + 1}{os.path.splitext(candidate)[1]}")
               shutil.move(candidate, parked)
               fallbacks.append((parked, seen_height, client_list))
@@ -382,23 +400,32 @@ jobs:
                   f"server allows. Choose a lower quality."
               )
 
-          title = ""
-          title_client = accepted_client or "web_embedded,web_creator,mweb"
-          try:
-              probe = subprocess.run(
-                  [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-                   "--js-runtimes", "deno", "--js-runtimes", "node", "--remote-components", "ejs:github",
-                   "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-                   "--extractor-args", f"youtube:player_client={title_client}",
-                   "--skip-download", "--print", "%(title)s", URL],
-                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
-              if probe.returncode == 0 and probe.stdout.strip():
-                  title = probe.stdout.strip().splitlines()[0]
-          except Exception:
-              pass
-
+          title = initial_title
           if not title:
-              title = os.path.splitext(os.path.basename(path))[0]
+              title_client = accepted_client or "default"
+              try:
+                  probe_cmd = [
+                      sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                      "--js-runtimes", "deno", "--js-runtimes", "node", "--remote-components", "ejs:github",
+                      "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+                  ]
+                  if accepted_client:
+                      probe_cmd += ["--extractor-args", f"youtube:player_client={title_client}"]
+                  probe_cmd += ["--skip-download", "--print", "%(title)s", URL]
+                  probe = subprocess.run(
+                      probe_cmd,
+                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+                  if probe.returncode == 0 and probe.stdout.strip():
+                      title = probe.stdout.strip().splitlines()[0]
+              except Exception:
+                  pass
+
+          base_name = os.path.splitext(os.path.basename(path))[0]
+          if not title or title.startswith("fallback_") or title.startswith("download"):
+              if base_name and not base_name.startswith("fallback_") and not base_name.startswith("download"):
+                  title = base_name
+              else:
+                  title = f"video_{video_id}"
 
           if is_audio:
               suffix = final_ext
