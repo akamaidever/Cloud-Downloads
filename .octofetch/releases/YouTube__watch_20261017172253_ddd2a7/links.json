@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "co-releases-v1-9174",
+  "folder": "YouTube__watch_20261017172253_ddd2a7",
+  "base_name": "video_XZgOCVruvCk_XZgOCVruvCk_360p.mp4",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/co-releases-v1-9174",
+  "files": [
+    {
+      "name": "video_XZgOCVruvCk_XZgOCVruvCk_360p.mp4",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/co-releases-v1-9174/video_XZgOCVruvCk_XZgOCVruvCk_360p.mp4",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/651097077",
+      "id": 651097077,
+      "size": 150162554,
+      "download_count": 0
+    }
+  ]
+}
