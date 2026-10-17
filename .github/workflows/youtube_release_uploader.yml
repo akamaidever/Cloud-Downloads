@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeRelease-Version: 18
+# OctoFetch-YouTubeRelease-Version: 19
 
 name: 'YouTube to GitHub Release Engine'
 
@@ -237,9 +237,13 @@ jobs:
           # Early title probe so we always have the real title even before downloading
           initial_title = ""
           try:
+              probe_cmd_init = [
+                  sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                  "--skip-download", "--print", "%(title)s", URL]
+              if clean_cookie_file and os.path.exists(clean_cookie_file):
+                  probe_cmd_init += ["--cookies", clean_cookie_file]
               probe_init = subprocess.run(
-                  [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-                   "--skip-download", "--print", "%(title)s", URL],
+                  probe_cmd_init,
                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
               if probe_init.returncode == 0 and probe_init.stdout.strip():
                   initial_title = probe_init.stdout.strip().splitlines()[0]
@@ -331,13 +335,13 @@ jobs:
 
           strategies = []
           if clean_cookie_file and os.path.exists(clean_cookie_file):
+              strategies.append(("cookies: web_safari", "web_safari", clean_cookie_file))
               strategies.append(("cookies: default", None, clean_cookie_file))
               strategies.append(("cookies: web,web_creator", "web,web_creator", clean_cookie_file))
               stripped_cookie_file = os.path.join(os.getcwd(), "yt_cookies_stripped.txt")
               if sanitize_cookie_file(cookies_file, stripped_cookie_file, strip_rolling=True):
+                  strategies.append(("stripped cookies: web_safari", "web_safari", stripped_cookie_file))
                   strategies.append(("stripped cookies: default", None, stripped_cookie_file))
-                  strategies.append(("stripped cookies: web,web_creator", "web,web_creator", stripped_cookie_file))
-              strategies.append(("cookies: ios,web", "ios,web", clean_cookie_file))
               strategies.append(("cookies: web_embedded,mweb", "web_embedded,mweb", clean_cookie_file))
           strategies.append(("anonymous: default", None, None))
           strategies.append(("anonymous: web,web_creator", "web,web_creator", None))
@@ -412,7 +416,7 @@ jobs:
 
           title = initial_title
           if not title:
-              title_client = accepted_client or "default"
+              title_client = accepted_client or "web_safari"
               try:
                   probe_cmd = [
                       sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
@@ -421,6 +425,8 @@ jobs:
                   ]
                   if accepted_client:
                       probe_cmd += ["--extractor-args", f"youtube:player_client={title_client}"]
+                  if clean_cookie_file and os.path.exists(clean_cookie_file):
+                      probe_cmd += ["--cookies", clean_cookie_file]
                   probe_cmd += ["--skip-download", "--print", "%(title)s", URL]
                   probe = subprocess.run(
                       probe_cmd,
@@ -443,7 +449,7 @@ jobs:
               # Label with the REAL resolution of the file, never the requested one.
               real_height = probe_height(path) or actual_height
               suffix = f"{real_height}p" if real_height else f"{height}p"
-          clean = re.sub(r"[^A-Za-z0-9\-_()\[\]]", "_", title.replace(" ", "_"))
+          clean = re.sub(r"[^\w\-_()\[\]]", "_", title.replace(" ", "_"), flags=re.UNICODE)
           clean = re.sub(r"_+", "_", clean).strip("_")[:70] or video_id
           clean = clean.lstrip("-")
           filename = f"{clean}_{video_id}_{suffix}.{final_ext}"
