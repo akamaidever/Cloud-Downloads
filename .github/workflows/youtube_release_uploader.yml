@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeRelease-Version: 16
+# OctoFetch-YouTubeRelease-Version: 17
 
 name: 'YouTube to GitHub Release Engine'
 
@@ -284,49 +284,89 @@ jobs:
                   print(f"::warning::Client [{client_list}] (cookies={bool(cookie_path)}) failed (exit {res.returncode}):\n{err_tail}\n{out_tail}")
               return res
 
-          def has_downloaded():
-              return any(
-                  f.startswith("download.") and os.path.getsize(f) > 0
-                  for f in os.listdir(".")
+          def is_download_file(name):
+              # Only real finished outputs: exclude .part temp files and
+              # .fN fragment leftovers that yt-dlp keeps mid-run.
+              return (
+                  name.startswith("download.")
+                  and os.path.isfile(name)
+                  and os.path.getsize(name) > 0
+                  and not name.endswith(".part")
+                  and ".part-" not in name
+                  and not re.match(r"download\.f\d+", name)
               )
 
-          proc = None
-          # Strategy 1: Attempt with user cookies (web_embedded is proven to work without GVS PO-Token block)
+          def has_downloaded():
+              return any(is_download_file(f) for f in os.listdir("."))
+
+          def probe_height(file_path):
+              """Real coded height of the first video stream, 0 when unknown."""
+              try:
+                  pr = subprocess.run(
+                      ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                       "-show_entries", "stream=height",
+                       "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+                      capture_output=True, text=True, timeout=60)
+                  if pr.returncode == 0 and pr.stdout.strip():
+                      return int(float(pr.stdout.strip().splitlines()[0]))
+              except Exception:
+                  pass
+              return 0
+
+          strategies = []
           if clean_cookie_file and os.path.exists(clean_cookie_file):
-              print("Attempting download with cookies (web_embedded, web_creator, mweb)...")
-              proc = run_ytdlp("web_embedded,web_creator,mweb", cookie_path=clean_cookie_file)
-              if proc.returncode != 0 and not has_downloaded():
-                  print("Retrying with cookies (android, ios)...")
-                  proc = run_ytdlp("android,ios", cookie_path=clean_cookie_file)
+              strategies.append(("cookies: web_embedded,web_creator,mweb", "web_embedded,web_creator,mweb", clean_cookie_file))
+              strategies.append(("cookies: android,ios", "android,ios", clean_cookie_file))
+              stripped_cookie_file = os.path.join(os.getcwd(), "yt_cookies_stripped.txt")
+              if sanitize_cookie_file(cookies_file, stripped_cookie_file, strip_rolling=True):
+                  strategies.append(("stripped cookies: web_embedded,web_creator,mweb", "web_embedded,web_creator,mweb", stripped_cookie_file))
+                  strategies.append(("stripped cookies: android,ios", "android,ios", stripped_cookie_file))
+              strategies.append(("cookies: tv,tv_embedded", "tv,tv_embedded", clean_cookie_file))
+          strategies.append(("anonymous: web_embedded,web_creator,mweb", "web_embedded,web_creator,mweb", None))
+          strategies.append(("anonymous: android,ios", "android,ios", None))
+          strategies.append(("anonymous: tv,tv_embedded", "tv,tv_embedded", None))
 
-              # Strategy 1b: If cookies failed due to rotation or challenge, auto-strip volatile tokens
-              if proc.returncode != 0 and not has_downloaded():
-                  stripped_cookie_file = os.path.join(os.getcwd(), "yt_cookies_stripped.txt")
-                  if sanitize_cookie_file(cookies_file, stripped_cookie_file, strip_rolling=True):
-                      print("Detected possible expired rolling tokens. Retrying with auto-repaired cookies...")
-                      proc = run_ytdlp("web_embedded,web_creator,mweb", cookie_path=stripped_cookie_file)
-                      if proc.returncode != 0 and not has_downloaded():
-                          proc = run_ytdlp("android,ios", cookie_path=stripped_cookie_file)
+          accepted_path = None
+          accepted_client = None
+          actual_height = 0
+          fallbacks = []
+          last_proc = None
 
-          # Strategy 2: If cookies failed or weren't provided, seamlessly fallback to anonymous PO-Token
-          if (not proc or proc.returncode != 0) and not has_downloaded():
-              print("Cookie session challenged or no cookies. Running yt-dlp with PO-Token (web_embedded, web_creator)...")
-              proc = run_ytdlp("web_embedded,web_creator,mweb", cookie_path=None)
+          # Run every strategy until one delivers the REQUESTED quality. A client
+          # that succeeds but only yields a low-res stream (e.g. YouTube's
+          # always-available 360p progressive fallback) is parked as a fallback
+          # and the chain continues with better clients.
+          for idx, (label, client_list, cookie_path) in enumerate(strategies):
+              print(f"\n=== Strategy {idx + 1}/{len(strategies)}: {label} ===")
+              last_proc = run_ytdlp(client_list, cookie_path=cookie_path)
+              files = [f for f in os.listdir(".") if is_download_file(f)]
+              if not files:
+                  continue
+              candidate = os.path.join(".", max(files, key=lambda f: os.path.getsize(f)))
+              if is_audio:
+                  accepted_path, accepted_client = candidate, client_list
+                  break
+              seen_height = probe_height(candidate)
+              if seen_height >= height:
+                  accepted_path, accepted_client, actual_height = candidate, client_list, seen_height
+                  print(f"Quality OK: real {seen_height}p >= requested {height}p. Stopping strategy chain.")
+                  break
+              print(f"::warning::Client [{client_list}] delivered only {seen_height or 'unknown'}p, requested {height}p. Trying next strategy...")
+              parked = os.path.join(".", f"fallback_{len(fallbacks) + 1}{os.path.splitext(candidate)[1]}")
+              shutil.move(candidate, parked)
+              fallbacks.append((parked, seen_height, client_list))
 
-          if (not proc or proc.returncode != 0) and not has_downloaded():
-              print("Retrying yt-dlp with PO-Token (android, ios)...")
-              proc = run_ytdlp("android,ios", cookie_path=None)
+          if accepted_path is None and fallbacks:
+              # Nothing met the requested quality: ship the best real result,
+              # named with its TRUE resolution, never a fake label.
+              fallbacks.sort(key=lambda t: (t[1], os.path.getsize(t[0])), reverse=True)
+              accepted_path, actual_height, accepted_client = fallbacks[0]
+              which = f" (client: {accepted_client})" if accepted_client else ""
+              print(f"::warning::Requested {height}p but only {actual_height or 'unknown'}p{which} could be downloaded. The file is named with its real resolution.")
+              print(f"::notice::Tip: add YouTube cookies in OctoFetch Settings to unlock higher resolutions, or the video itself may not offer {height}p.")
 
-          if (not proc or proc.returncode != 0) and not has_downloaded():
-              print("Retrying yt-dlp with PO-Token (tv, tv_embedded)...")
-              proc = run_ytdlp("tv,tv_embedded", cookie_path=None)
-
-          candidates = [
-              os.path.join(".", f) for f in os.listdir(".")
-              if f.startswith("download.") and os.path.getsize(f) > 0
-          ]
-          if not candidates:
-              err = (proc.stderr or "").strip() if proc else "No output from downloader"
+          if accepted_path is None:
+              err = (last_proc.stderr or "").strip() if last_proc else "No output from downloader"
               tail = "\n".join(err.splitlines()[-14:])
               if "Sign in to confirm you" in err or "confirm you are not a bot" in err:
                   die("YouTube asked to confirm you are not a bot (HTTP 403).", tail)
@@ -340,7 +380,7 @@ jobs:
                   die("YouTube refused to serve the video stream (HTTP 403).", tail)
               die("Downloader could not fetch this video.", tail)
 
-          path = max(candidates, key=os.path.getsize)
+          path = accepted_path
           size_mb = os.path.getsize(path) / 1048576
 
           if size_mb < 0.01:
@@ -353,14 +393,15 @@ jobs:
               )
 
           title = ""
+          title_client = accepted_client or "web_embedded,web_creator,mweb"
           try:
               probe = subprocess.run(
                   [sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
                    "--js-runtimes", "deno", "--js-runtimes", "node", "--remote-components", "ejs:github",
                    "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
-                   "--extractor-args", "youtube:player_client=web_embedded,web_creator,mweb",
+                   "--extractor-args", f"youtube:player_client={title_client}",
                    "--skip-download", "--print", "%(title)s", URL],
-                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
               if probe.returncode == 0 and probe.stdout.strip():
                   title = probe.stdout.strip().splitlines()[0]
           except Exception:
@@ -369,7 +410,12 @@ jobs:
           if not title:
               title = os.path.splitext(os.path.basename(path))[0]
 
-          suffix = f"{height}p" if not is_audio else final_ext
+          if is_audio:
+              suffix = final_ext
+          else:
+              # Label with the REAL resolution of the file, never the requested one.
+              real_height = probe_height(path) or actual_height
+              suffix = f"{real_height}p" if real_height else f"{height}p"
           clean = re.sub(r"[^A-Za-z0-9\-_()\[\]]", "_", title.replace(" ", "_"))
           clean = re.sub(r"_+", "_", clean).strip("_")[:70] or video_id
           clean = clean.lstrip("-")
