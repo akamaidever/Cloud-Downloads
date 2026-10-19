@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "co-releases-v1-5591",
+  "folder": "YouTube__watch_20261019200007_e8141d",
+  "base_name": "El_Alfa_(feat_Darell_Noriel)_-_4K_BXGsBopP-Ds_1080p.mp4",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/co-releases-v1-5591",
+  "files": [
+    {
+      "name": "El_Alfa_.feat_Darell_Noriel._-_4K_BXGsBopP-Ds_1080p.mp4",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/co-releases-v1-5591/El_Alfa_.feat_Darell_Noriel._-_4K_BXGsBopP-Ds_1080p.mp4",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/657295062",
+      "id": 657295062,
+      "size": 4867990,
+      "download_count": 0
+    }
+  ]
+}
