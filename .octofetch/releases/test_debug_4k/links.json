@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "test-4k-debug",
+  "folder": "test_debug_4k",
+  "base_name": "El_Alfa_(feat_Darell_Noriel)_-_4K_BXGsBopP-Ds_1080p.mp4",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/test-4k-debug",
+  "files": [
+    {
+      "name": "El_Alfa_.feat_Darell_Noriel._-_4K_BXGsBopP-Ds_1080p.mp4",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/test-4k-debug/El_Alfa_.feat_Darell_Noriel._-_4K_BXGsBopP-Ds_1080p.mp4",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/657374618",
+      "id": 657374618,
+      "size": 4867990,
+      "download_count": 0
+    }
+  ]
+}
