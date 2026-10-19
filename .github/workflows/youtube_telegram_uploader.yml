@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeTelegram-Version: 2
+# OctoFetch-YouTubeTelegram-Version: 3
 
 name: 'YouTube → Telegram Engine'
 
@@ -119,9 +119,18 @@ jobs:
           pip3 install --quiet -U "yt-dlp[default]" yt-dlp-ejs bgutil-ytdlp-pot-provider telethon cryptg
 
       - name: Install Deno Runtime
+        continue-on-error: true
         run: |
-          curl -fsSL https://deno.land/install.sh | sh
-          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+          for i in 1 2 3 4 5; do
+            if curl -fsSL --retry 3 --retry-delay 2 https://deno.land/install.sh | sh; then
+              echo "$HOME/.deno/bin" >> $GITHUB_PATH
+              echo "Deno installed successfully."
+              exit 0
+            fi
+            echo "Deno install attempt $i failed, retrying in 3s..."
+            sleep 3
+          done
+          echo "::warning::Deno install failed after retries; yt-dlp will fall back to Node/EJS runtime."
 
       - name: Download YouTube Media
         env:
@@ -301,8 +310,6 @@ jobs:
               deno_bin = shutil.which("deno") or os.path.expanduser("~/.deno/bin/deno")
               if isinstance(deno_bin, str) and os.path.exists(deno_bin):
                   c += ["--js-runtimes", f"deno:{deno_bin}"]
-              else:
-                  c += ["--js-runtimes", "deno"]
               c += ["--js-runtimes", "node", "--remote-components", "ejs:github"]
               if cookie_path and os.path.exists(cookie_path):
                   c += ["--cookies", cookie_path]
@@ -423,9 +430,11 @@ jobs:
               try:
                   probe_cmd = [
                       sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
-                      "--js-runtimes", "deno", "--js-runtimes", "node", "--remote-components", "ejs:github",
+                      "--js-runtimes", "node", "--remote-components", "ejs:github",
                       "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
                   ]
+                  if isinstance(deno_bin, str) and os.path.exists(deno_bin):
+                      probe_cmd += ["--js-runtimes", f"deno:{deno_bin}"]
                   if accepted_client:
                       probe_cmd += ["--extractor-args", f"youtube:player_client={title_client}"]
                   if clean_cookie_file and os.path.exists(clean_cookie_file):
