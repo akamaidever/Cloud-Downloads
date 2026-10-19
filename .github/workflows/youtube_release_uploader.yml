@@ -281,8 +281,10 @@ jobs:
                   "--fragment-retries", "5",
                   "--socket-timeout", "30",
               ]
-              if client_list != "visionos":
-                  c += ["--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"]
+              c += [
+                  "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+                  "--extractor-args", "youtube:formats=missing_pot",
+              ]
               if client_list:
                   c += ["--extractor-args", f"youtube:player_client={client_list}"]
               c += [
@@ -340,10 +342,15 @@ jobs:
 
           strategies = []
           # When user requests 4K (2160p) or 1440p:
-          # Standard web and safari clients cap at 1080p due to codec and SABR restrictions.
-          # The visionos player client provides native 4K (2160p) and 1440p HLS streams.
+          # When user requests 4K (2160p) or 1440p:
+          # Logged-in accounts have SABR forced by YouTube which strips direct 4K URLs.
+          # Anonymous clients (android_vr, visionos, tv_simply, default) with missing_pot flag provide native 4K/1440p streams.
           if height > 1080:
+              strategies.append(("anonymous: android_vr", "android_vr", None))
               strategies.append(("anonymous: visionos", "visionos", None))
+              strategies.append(("anonymous: tv_simply", "tv_simply", None))
+              strategies.append(("anonymous: default", None, None))
+              strategies.append(("anonymous: web,web_creator", "web,web_creator", None))
 
           if clean_cookie_file and os.path.exists(clean_cookie_file):
               strategies.append(("cookies: web_safari", "web_safari", clean_cookie_file))
@@ -357,7 +364,9 @@ jobs:
 
           # For standard resolutions (<=1080p) or as fallback when cookies are present
           if height <= 1080:
+              strategies.append(("anonymous: android_vr", "android_vr", None))
               strategies.append(("anonymous: visionos", "visionos", None))
+              strategies.append(("anonymous: tv_simply", "tv_simply", None))
 
           strategies.append(("anonymous: default", None, None))
           strategies.append(("anonymous: web,web_creator", "web,web_creator", None))
