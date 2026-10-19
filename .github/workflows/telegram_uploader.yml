@@ -1,4 +1,4 @@
-# OctoFetch-Telegram-Version: 3
+# OctoFetch-Telegram-Version: 4
 
 name: 'Telegram Upload Engine'
 
@@ -230,7 +230,20 @@ jobs:
           api_hash = os.environ.get("API_HASH", "ae32caf162207865ff93b9b931b2ba54")
           caption_tmpl = os.environ.get("CAPTION", "").strip()
           split_limit_mb = int(os.environ.get("SPLIT_LIMIT_MB", "2000"))
-          split_limit_bytes = split_limit_mb * 1024 * 1024
+
+          # Dynamic splitting threshold & part sizing:
+          # - Free account / Bot: 2 GB ceiling -> split into 1.9 GB (1900 MB) parts if > 2 GB
+          # - Premium account: 4 GB ceiling -> split into 3.9 GB (3900 MB) parts if > 4 GB
+          if split_limit_mb >= 3000:
+              threshold_bytes = 4000 * 1024 * 1024
+              part_size_bytes = 3900 * 1024 * 1024
+              policy_name = "Premium (Threshold: 4 GB, Part size: 3.9 GB)"
+          else:
+              threshold_bytes = 2000 * 1024 * 1024
+              part_size_bytes = 1900 * 1024 * 1024
+              policy_name = "Free Account / Bot (Threshold: 2 GB, Part size: 1.9 GB)"
+
+          print(f"Telegram auto-split policy: {policy_name}", flush=True)
 
           # Find downloaded files
           files = sorted(glob.glob("source_file/*"))
@@ -239,17 +252,17 @@ jobs:
               print("::error::No files to upload", file=sys.stderr)
               sys.exit(1)
 
-          # Auto-split files larger than split_limit_bytes
+          # Auto-split files larger than threshold_bytes
           files_to_upload = []
           for fpath in files:
               size = os.path.getsize(fpath)
-              if size > split_limit_bytes:
-                  print(f"File {fpath} ({size / (1024*1024):.1f} MB) exceeds {split_limit_mb} MB limit. Splitting into parts...", flush=True)
+              if size > threshold_bytes:
+                  print(f"File {fpath} ({size / (1024*1024):.1f} MB) exceeds {threshold_bytes // (1024*1024)} MB limit. Splitting into {part_size_bytes // (1024*1024)} MB parts...", flush=True)
                   base_name = os.path.basename(fpath)
                   part_num = 1
                   with open(fpath, "rb") as src:
                       while True:
-                          chunk = src.read(split_limit_bytes)
+                          chunk = src.read(part_size_bytes)
                           if not chunk:
                               break
                           part_path = f"source_file/{base_name}.part{part_num:03d}"
