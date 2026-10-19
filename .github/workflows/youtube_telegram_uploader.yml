@@ -1,0 +1,371 @@
+# OctoFetch-YouTubeTelegram-Version: 1
+
+name: 'YouTube → Telegram Engine'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube video URL'
+        required: true
+        type: string
+      folder_name:
+        description: 'Folder identifier used for the links manifest path'
+        required: true
+        type: string
+      output_format:
+        description: 'mp4 or mp3'
+        required: false
+        type: string
+        default: 'mp4'
+      desired_quality:
+        description: 'Video quality (720p, 1080p) or audio bitrate (128kbps, 192kbps, 320kbps)'
+        required: false
+        type: string
+        default: '1080p'
+      cookies:
+        description: 'Optional YouTube cookies in Netscape format, base64-encoded.'
+        required: false
+        type: string
+        default: ''
+      max_mb:
+        description: 'Refuse videos larger than this many MB. 0 means no limit.'
+        required: false
+        type: string
+        default: '0'
+      telegram_target:
+        description: 'Destination channel/group ID or username (e.g. @mychannel or -1001234567890)'
+        required: true
+        type: string
+      telegram_worker_type:
+        description: 'bot or account'
+        required: false
+        type: string
+        default: 'bot'
+      telegram_bot_token:
+        description: 'Bot token (if worker_type is bot)'
+        required: false
+        type: string
+        default: ''
+      telegram_session:
+        description: 'Base64-encoded user session (if worker_type is account)'
+        required: false
+        type: string
+        default: ''
+      telegram_api_id:
+        description: 'Telegram API ID'
+        required: false
+        type: string
+        default: '16612056'
+      telegram_api_hash:
+        description: 'Telegram API Hash'
+        required: false
+        type: string
+        default: 'ae32caf162207865ff93b9b931b2ba54'
+      telegram_caption:
+        description: 'Custom message caption template'
+        required: false
+        type: string
+        default: ''
+      telegram_split_limit_mb:
+        description: 'Maximum file size in MB before splitting (e.g. 2000 for bots/standard, 4000 for premium)'
+        required: false
+        type: string
+        default: '2000'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yt-tg-${{ github.event.inputs.folder_name }}
+  cancel-in-progress: false
+
+jobs:
+  youtube-telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+
+      - name: Checkout (sparse, fast)
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            .github
+          sparse-checkout-cone-mode: false
+
+      - name: Start PO-Token Provider (Docker)
+        run: |
+          docker run --name bgutil-provider -d --restart always -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:4416/ping >/dev/null 2>&1; then
+              echo "PO-Token Provider is ready."
+              break
+            fi
+            echo "Waiting for PO-Token Provider..."
+            sleep 1
+          done
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y zip curl python3 python3-pip ffmpeg
+          pip3 install --quiet -U "yt-dlp[default]" yt-dlp-ejs bgutil-ytdlp-pot-provider telethon cryptg
+
+      - name: Install Deno Runtime
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
+      - name: Download YouTube Media
+        env:
+          INPUT_URL: ${{ github.event.inputs.video_url }}
+          INPUT_FOLDER: ${{ github.event.inputs.folder_name }}
+          INPUT_FORMAT: ${{ github.event.inputs.output_format }}
+          INPUT_QUALITY: ${{ github.event.inputs.desired_quality }}
+          INPUT_COOKIES: ${{ github.event.inputs.cookies }}
+          INPUT_MAX_MB: ${{ github.event.inputs.max_mb }}
+        run: |
+          set -e
+          export PATH="$HOME/.deno/bin:$PATH"
+
+          mkdir -p output_media
+          cd output_media
+
+          python3 - <<'PYEOF'
+          import os, sys, subprocess, base64
+
+          url = os.environ.get("INPUT_URL")
+          folder = os.environ.get("INPUT_FOLDER")
+          fmt = os.environ.get("INPUT_FORMAT", "mp4").lower()
+          quality = os.environ.get("INPUT_QUALITY", "1080p")
+          cookies_b64 = os.environ.get("INPUT_COOKIES", "")
+          max_mb = os.environ.get("INPUT_MAX_MB", "0")
+
+          cookies_arg = []
+          if cookies_b64:
+              try:
+                  raw_cookies = base64.b64decode(cookies_b64).decode("utf-8")
+                  with open("cookies.txt", "w", encoding="utf-8") as f:
+                      f.write(raw_cookies)
+                  cookies_arg = ["--cookies", "cookies.txt"]
+              except Exception as e:
+                  print(f"Warning: Failed to load cookies: {e}")
+
+          # Format selector matching OctoFetch quality standards
+          format_selector = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+          if "720" in quality:
+              format_selector = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+          elif "1440" in quality or "2k" in quality.lower():
+              format_selector = "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best"
+          elif "2160" in quality or "4k" in quality.lower():
+              format_selector = "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best"
+
+          cmd = [
+              "yt-dlp",
+              "--no-warnings",
+              "--no-playlist",
+              "-f", format_selector,
+              "--merge-output-format", "mp4" if fmt == "mp4" else "mkv",
+              "-o", "%(title)s.%(ext)s"
+          ] + cookies_arg + [url]
+
+          if fmt == "mp3":
+              cmd = [
+                  "yt-dlp",
+                  "--no-warnings",
+                  "--no-playlist",
+                  "-x",
+                  "--audio-format", "mp3",
+                  "--audio-quality", quality.replace("kbps", ""),
+                  "-o", "%(title)s.%(ext)s"
+              ] + cookies_arg + [url]
+
+          subprocess.run(cmd, check=True)
+          PYEOF
+          cd ..
+
+      - name: Upload Media to Telegram
+        env:
+          FOLDER: ${{ github.event.inputs.folder_name }}
+          TARGET: ${{ github.event.inputs.telegram_target }}
+          WORKER_TYPE: ${{ github.event.inputs.telegram_worker_type }}
+          BOT_TOKEN: ${{ github.event.inputs.telegram_bot_token }}
+          SESSION_DATA: ${{ github.event.inputs.telegram_session }}
+          API_ID: ${{ github.event.inputs.telegram_api_id }}
+          API_HASH: ${{ github.event.inputs.telegram_api_hash }}
+          CAPTION: ${{ github.event.inputs.telegram_caption }}
+          SPLIT_LIMIT_MB: ${{ github.event.inputs.telegram_split_limit_mb }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYEOF'
+          import os, sys, glob, json, math, base64, asyncio
+
+          folder = os.environ.get("FOLDER")
+          target_chat = os.environ.get("TARGET", "").strip()
+          worker_type = os.environ.get("WORKER_TYPE", "bot").lower()
+          bot_token = os.environ.get("BOT_TOKEN", "").strip()
+          session_data = os.environ.get("SESSION_DATA", "").strip()
+          api_id = int(os.environ.get("API_ID", "16612056"))
+          api_hash = os.environ.get("API_HASH", "ae32caf162207865ff93b9b931b2ba54")
+          caption_tmpl = os.environ.get("CAPTION", "").strip()
+          split_limit_mb = int(os.environ.get("SPLIT_LIMIT_MB", "2000"))
+          split_limit_bytes = split_limit_mb * 1024 * 1024
+
+          files = sorted(glob.glob("output_media/*"))
+          files = [f for f in files if os.path.isfile(f) and not f.endswith(".txt")]
+          if not files:
+              print("::error::No downloaded media found to upload", file=sys.stderr)
+              sys.exit(1)
+
+          files_to_upload = []
+          for fpath in files:
+              size = os.path.getsize(fpath)
+              if size > split_limit_bytes:
+                  print(f"Media {fpath} ({size / (1024*1024):.1f} MB) exceeds {split_limit_mb} MB limit. Splitting...")
+                  base_name = os.path.basename(fpath)
+                  part_num = 1
+                  with open(fpath, "rb") as src:
+                      while True:
+                          chunk = src.read(split_limit_bytes)
+                          if not chunk:
+                              break
+                          part_path = f"output_media/{base_name}.part{part_num:03d}"
+                          with open(part_path, "wb") as dst:
+                              dst.write(chunk)
+                          files_to_upload.append(part_path)
+                          part_num += 1
+                  os.remove(fpath)
+              else:
+                  files_to_upload.append(fpath)
+
+          async def main():
+              from telethon import TelegramClient
+              from telethon.sessions import StringSession
+
+              session_to_use = None
+              if session_data:
+                  try:
+                      session_to_use = StringSession(session_data)
+                  except Exception:
+                      sess_bytes = base64.b64decode(session_data)
+                      with open("temp_account.session", "wb") as sf:
+                          sf.write(sess_bytes)
+                      session_to_use = "temp_account"
+              else:
+                  session_to_use = StringSession()
+
+              client = TelegramClient(session_to_use, api_id, api_hash)
+              if worker_type == "bot" and bot_token:
+                  await client.start(bot_token=bot_token)
+              else:
+                  await client.connect()
+                  if not await client.is_user_authorized():
+                      if bot_token:
+                          await client.start(bot_token=bot_token)
+                      else:
+                          print("::error::Telegram client could not authorize session.", file=sys.stderr)
+                          sys.exit(1)
+
+              entity = None
+              try:
+                  if target_chat.startswith("-") or target_chat.isdigit():
+                      entity = await client.get_entity(int(target_chat))
+                  else:
+                      clean_target = target_chat.lstrip("@").split("/")[-1]
+                      entity = await client.get_entity(clean_target)
+              except Exception as e:
+                  print(f"::error::Could not resolve Telegram target '{target_chat}': {e}", file=sys.stderr)
+                  sys.exit(1)
+
+              results = []
+              total_count = len(files_to_upload)
+
+              for idx, fpath in enumerate(files_to_upload, start=1):
+                  fname = os.path.basename(fpath)
+                  fsize = os.path.getsize(fpath)
+                  cap = caption_tmpl.replace("{name}", fname).replace("{file}", fname) if caption_tmpl else fname
+                  if total_count > 1:
+                      cap += f" [{idx}/{total_count}]"
+
+                  print(f"Uploading [{idx}/{total_count}]: {fname} ({fsize / (1024*1024):.1f} MB)...")
+
+                  last_reported_pct = [0]
+                  def callback(uploaded, total):
+                      if total > 0:
+                          pct = int((uploaded / total) * 100)
+                          if pct >= last_reported_pct[0] + 20 or pct == 100:
+                              last_reported_pct[0] = pct
+                              print(f"  > Progress: {pct}% ({uploaded // (1024*1024)}/{total // (1024*1024)} MB)")
+
+                  msg = await client.send_file(
+                      entity,
+                      fpath,
+                      caption=cap,
+                      progress_callback=callback
+                  )
+
+                  post_url = ""
+                  try:
+                      if hasattr(entity, "username") and entity.username:
+                          post_url = f"https://t.me/{entity.username}/{msg.id}"
+                      elif target_chat.startswith("-100"):
+                          clean_id = target_chat[4:]
+                          post_url = f"https://t.me/c/{clean_id}/{msg.id}"
+                  except Exception:
+                      pass
+
+                  results.append({
+                      "name": fname,
+                      "size": fsize,
+                      "message_id": msg.id,
+                      "url": post_url or f"Telegram: message {msg.id}"
+                  })
+                  print(f"Uploaded: {fname} -> Message ID {msg.id}")
+
+              await client.disconnect()
+
+              out_dir = os.path.join(".octofetch", "telegram", folder)
+              os.makedirs(out_dir, exist_ok=True)
+              with open(os.path.join(out_dir, "links.json"), "w", encoding="utf-8") as f:
+                  json.dump({"destination": "telegram", "target": target_chat, "files": results}, f, indent=2)
+
+          asyncio.run(main())
+          PYEOF
+
+      - name: Commit links manifest
+        run: |
+          set -euo pipefail
+
+          git config user.name "OctoFetchBot"
+          git config user.email "bot@octofetch.local"
+          git config advice.updateSparsePath false
+
+          git add --sparse -- ".octofetch/telegram/$FOLDER/links.json"
+          if git diff --cached --quiet; then
+            echo "No links.json staged."
+            exit 0
+          fi
+          git commit -m "Telegram: $FOLDER links manifest"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin >/dev/null 2>&1 || true
+            git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 || true
+            if git push; then
+              echo "Manifest pushed on attempt $attempt"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::Failed to push links.json after 5 attempts"
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf output_media 2>/dev/null || true
