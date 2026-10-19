@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeRelease-Version: 20
+# OctoFetch-YouTubeRelease-Version: 21
 
 name: 'YouTube to GitHub Release Engine'
 
@@ -275,6 +275,7 @@ jobs:
               c = [
                   sys.executable, "-m", "yt_dlp",
                   "--no-playlist",
+                  "-v",
                   "--newline",
                   "--retries", "5",
                   "--fragment-retries", "5",
@@ -300,10 +301,12 @@ jobs:
                   c += postprocess
               c.append(URL)
               res = subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace")
-              if res.returncode != 0 and not has_downloaded():
-                  err_tail = "\n".join((res.stderr or "").splitlines()[-10:])
-                  out_tail = "\n".join((res.stdout or "").splitlines()[-10:])
-                  print(f"::warning::Client [{client_list or 'default'}] (cookies={bool(cookie_path)}) failed (exit {res.returncode}):\n{err_tail}\n{out_tail}")
+              print(f"::group::yt-dlp debug log for [{client_list or 'default'}] (cookies={bool(cookie_path)}) exit={res.returncode}")
+              if res.stdout:
+                  print(res.stdout)
+              if res.stderr:
+                  print(res.stderr)
+              print("::endgroup::")
               return res
 
           def is_download_file(name):
