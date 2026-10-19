@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeRelease-Version: 19
+# OctoFetch-YouTubeRelease-Version: 20
 
 name: 'YouTube to GitHub Release Engine'
 
@@ -263,6 +263,7 @@ jobs:
                   postprocess = []
           else:
               selector = (
+                  f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
                   f"bestvideo[height<={height}]+bestaudio/"
                   f"best[height<={height}]/"
                   f"bestvideo+bestaudio/"
@@ -278,8 +279,9 @@ jobs:
                   "--retries", "5",
                   "--fragment-retries", "5",
                   "--socket-timeout", "30",
-                  "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
               ]
+              if client_list != "visionos":
+                  c += ["--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"]
               if client_list:
                   c += ["--extractor-args", f"youtube:player_client={client_list}"]
               c += [
@@ -334,6 +336,12 @@ jobs:
               return 0
 
           strategies = []
+          # When user requests 4K (2160p) or 1440p:
+          # Standard web and safari clients cap at 1080p due to codec and SABR restrictions.
+          # The visionos player client provides native 4K (2160p) and 1440p HLS streams.
+          if height > 1080:
+              strategies.append(("anonymous: visionos", "visionos", None))
+
           if clean_cookie_file and os.path.exists(clean_cookie_file):
               strategies.append(("cookies: web_safari", "web_safari", clean_cookie_file))
               strategies.append(("cookies: default", None, clean_cookie_file))
@@ -343,6 +351,11 @@ jobs:
                   strategies.append(("stripped cookies: web_safari", "web_safari", stripped_cookie_file))
                   strategies.append(("stripped cookies: default", None, stripped_cookie_file))
               strategies.append(("cookies: web_embedded,mweb", "web_embedded,mweb", clean_cookie_file))
+
+          # For standard resolutions (<=1080p) or as fallback when cookies are present
+          if height <= 1080:
+              strategies.append(("anonymous: visionos", "visionos", None))
+
           strategies.append(("anonymous: default", None, None))
           strategies.append(("anonymous: web,web_creator", "web,web_creator", None))
           strategies.append(("anonymous: ios,web", "ios,web", None))
