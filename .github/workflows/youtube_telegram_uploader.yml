@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeTelegram-Version: 1
+# OctoFetch-YouTubeTelegram-Version: 2
 
 name: 'YouTube → Telegram Engine'
 
@@ -97,6 +97,7 @@ jobs:
           filter: blob:none
           sparse-checkout: |
             .github
+            .octofetch
           sparse-checkout-cone-mode: false
 
       - name: Start PO-Token Provider (Docker)
@@ -135,60 +136,352 @@ jobs:
           export PATH="$HOME/.deno/bin:$PATH"
 
           mkdir -p output_media
-          cd output_media
 
           python3 - <<'PYEOF'
-          import os, sys, subprocess, base64
+          import base64
+          import glob
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import time
 
-          url = os.environ.get("INPUT_URL")
-          folder = os.environ.get("INPUT_FOLDER")
-          fmt = os.environ.get("INPUT_FORMAT", "mp4").lower()
-          quality = os.environ.get("INPUT_QUALITY", "1080p")
-          cookies_b64 = os.environ.get("INPUT_COOKIES", "")
-          max_mb = os.environ.get("INPUT_MAX_MB", "0")
+          URL = os.environ.get("INPUT_URL", "").strip()
+          FMT = os.environ.get("INPUT_FORMAT", "mp4").strip().lower()
+          QUALITY = os.environ.get("INPUT_QUALITY", "1080p").strip().lower()
+          COOKIES_B64 = os.environ.get("INPUT_COOKIES", "").strip()
+          CHUNK_LIMIT_MB = int(os.environ.get("INPUT_MAX_MB", "0") or 0)
 
-          cookies_arg = []
-          if cookies_b64:
+          cookies_file = None
+          clean_cookie_file = None
+          stripped_cookie_file = None
+
+          def die(message, detail=""):
+              for cf in (cookies_file, clean_cookie_file, stripped_cookie_file):
+                  if cf and os.path.exists(cf):
+                      try:
+                          os.remove(cf)
+                      except OSError:
+                          pass
+              print("Cleaned up temporary cookie files.")
+              if detail:
+                  print(f"::error::{message}")
+                  print(detail)
+              else:
+                  print(f"::error::{message}")
+              sys.exit(1)
+
+          def quality_height(raw):
+              m = re.search(r"(\d{3,4})", raw or "")
+              if not m:
+                  return 1080
+              value = int(m.group(1))
+              for floor in (2160, 1440, 1080, 720, 480, 360, 240, 144):
+                  if value >= floor:
+                      return floor
+              return 144
+
+          def sanitize_cookie_file(src_path, dst_path, strip_rolling=False):
+              if not src_path or not os.path.exists(src_path):
+                  return False
+              with open(src_path, "r", encoding="utf-8", errors="replace") as fh:
+                  lines = fh.readlines()
+              out_lines = [
+                  "# Netscape HTTP Cookie File\n",
+                  "# https://curl.haxx.se/rfc/cookie_spec.html\n",
+                  "# This is a generated file! Do not edit.\n\n"
+              ]
+              kept = 0
+              for line in lines:
+                  s = line.strip()
+                  if not s or s.startswith("# Netscape") or s.startswith("# http") or s.startswith("# This is"):
+                      continue
+                  if s.startswith("#") and not s.startswith("#HttpOnly_"):
+                      continue
+                  parts = s.split("\t")
+                  if len(parts) < 7:
+                      parts = re.split(r"\s+", s)
+                  if len(parts) >= 7:
+                      cname = parts[5].strip()
+                      if strip_rolling and any(k in cname for k in ("PSIDTS", "SIDCC")):
+                          continue
+                      cleaned_row = "\t".join([p.strip() for p in parts[:6]] + ["\t".join(parts[6:]).strip()])
+                      out_lines.append(cleaned_row + "\n")
+                      kept += 1
+              if kept > 0:
+                  with open(dst_path, "w", encoding="utf-8", newline="\n") as fh:
+                      fh.writelines(out_lines)
+                  os.chmod(dst_path, 0o600)
+                  return True
+              return False
+
+          if COOKIES_B64:
               try:
-                  raw_cookies = base64.b64decode(cookies_b64).decode("utf-8")
-                  with open("cookies.txt", "w", encoding="utf-8") as f:
-                      f.write(raw_cookies)
-                  cookies_arg = ["--cookies", "cookies.txt"]
-              except Exception as e:
-                  print(f"Warning: Failed to load cookies: {e}")
+                  raw = base64.b64decode(COOKIES_B64, validate=True).decode("utf-8")
+                  cookies_file = os.path.join(os.getcwd(), "yt_cookies.txt")
+                  with open(cookies_file, "w", encoding="utf-8", newline="\n") as fh:
+                      fh.write(raw if raw.endswith("\n") else raw + "\n")
+                  os.chmod(cookies_file, 0o600)
+                  clean_cookie_file = os.path.join(os.getcwd(), "yt_cookies_clean.txt")
+                  if sanitize_cookie_file(cookies_file, clean_cookie_file, strip_rolling=False):
+                      print("Validated and formatted YouTube cookies.")
+                  else:
+                      clean_cookie_file = cookies_file
+                      print("Using raw YouTube cookies.")
+              except Exception as exc:
+                  print(f"::warning::Cookies decode warning: {exc}")
+          else:
+              print("No YouTube cookies supplied via INPUT_COOKIES.")
 
-          # Format selector matching OctoFetch quality standards
-          format_selector = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
-          if "720" in quality:
-              format_selector = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-          elif "1440" in quality or "2k" in quality.lower():
-              format_selector = "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best"
-          elif "2160" in quality or "4k" in quality.lower():
-              format_selector = "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best"
+          if not URL:
+              die("No video URL was supplied.")
 
-          cmd = [
-              "yt-dlp",
-              "--no-warnings",
-              "--no-playlist",
-              "-f", format_selector,
-              "--merge-output-format", "mp4" if fmt == "mp4" else "mkv",
-              "-o", "%(title)s.%(ext)s"
-          ] + cookies_arg + [url]
+          is_audio = FMT in ("mp3", "m4a", "opus", "wav")
+          height = quality_height(QUALITY)
+          final_ext = "mp3" if FMT == "mp3" else ("m4a" if is_audio else "mp4")
 
-          if fmt == "mp3":
-              cmd = [
-                  "yt-dlp",
-                  "--no-warnings",
+          video_id = "video"
+          m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})", URL)
+          if m:
+              video_id = m.group(1)
+
+          initial_title = ""
+          try:
+              probe_cmd_init = [
+                  sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                  "--skip-download", "--print", "%(title)s", URL]
+              if clean_cookie_file and os.path.exists(clean_cookie_file):
+                  probe_cmd_init += ["--cookies", clean_cookie_file]
+              probe_init = subprocess.run(
+                  probe_cmd_init,
+                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+              if probe_init.returncode == 0 and probe_init.stdout.strip():
+                  initial_title = probe_init.stdout.strip().splitlines()[0]
+                  print(f"Title   : {initial_title}")
+          except Exception:
+              pass
+
+          print(f"Fetching: {URL}")
+          print(f"Format  : {'audio (' + final_ext + ')' if is_audio else 'video up to ' + str(height) + 'p'}")
+
+          if is_audio:
+              if FMT == "mp3":
+                  selector = "bestaudio/best"
+                  postprocess = ["--extract-audio", "--audio-format", "mp3"]
+              else:
+                  selector = f"bestaudio[ext={FMT}]/bestaudio/best"
+                  postprocess = []
+          else:
+              selector = (
+                  f"bestvideo[height<={height}]+bestaudio/"
+                  f"best[height<={height}]/"
+                  f"bestvideo+bestaudio/"
+                  f"best"
+              )
+              postprocess = ["--merge-output-format", "mp4"]
+
+          def run_ytdlp(client_list=None, cookie_path=None):
+              c = [
+                  sys.executable, "-m", "yt_dlp",
                   "--no-playlist",
-                  "-x",
-                  "--audio-format", "mp3",
-                  "--audio-quality", quality.replace("kbps", ""),
-                  "-o", "%(title)s.%(ext)s"
-              ] + cookies_arg + [url]
+                  "--newline",
+                  "--retries", "5",
+                  "--fragment-retries", "5",
+                  "--socket-timeout", "30",
+                  "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+              ]
+              if client_list:
+                  c += ["--extractor-args", f"youtube:player_client={client_list}"]
+              c += [
+                  "-f", selector,
+                  "-o", "download.%(ext)s",
+              ]
+              deno_bin = shutil.which("deno") or os.path.expanduser("~/.deno/bin/deno")
+              if isinstance(deno_bin, str) and os.path.exists(deno_bin):
+                  c += ["--js-runtimes", f"deno:{deno_bin}"]
+              else:
+                  c += ["--js-runtimes", "deno"]
+              c += ["--js-runtimes", "node", "--remote-components", "ejs:github"]
+              if cookie_path and os.path.exists(cookie_path):
+                  c += ["--cookies", cookie_path]
+              if postprocess:
+                  c += postprocess
+              c.append(URL)
+              res = subprocess.run(c, capture_output=True, text=True, encoding="utf-8", errors="replace")
+              if res.returncode != 0 and not has_downloaded():
+                  err_tail = "\n".join((res.stderr or "").splitlines()[-10:])
+                  out_tail = "\n".join((res.stdout or "").splitlines()[-10:])
+                  print(f"::warning::Client [{client_list or 'default'}] (cookies={bool(cookie_path)}) failed (exit {res.returncode}):\n{err_tail}\n{out_tail}")
+              return res
 
-          subprocess.run(cmd, check=True)
+          def is_download_file(name):
+              return (
+                  name.startswith("download.")
+                  and os.path.isfile(name)
+                  and os.path.getsize(name) > 0
+                  and not name.endswith(".part")
+                  and ".part-" not in name
+                  and not re.match(r"download\.f\d+", name)
+              )
+
+          def has_downloaded():
+              return any(is_download_file(f) for f in os.listdir("."))
+
+          def probe_height(file_path):
+              try:
+                  pr = subprocess.run(
+                      ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                       "-show_entries", "stream=height",
+                       "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+                      capture_output=True, text=True, timeout=60)
+                  if pr.returncode == 0 and pr.stdout.strip():
+                      return int(float(pr.stdout.strip().splitlines()[0]))
+              except Exception:
+                  pass
+              return 0
+
+          strategies = []
+          if clean_cookie_file and os.path.exists(clean_cookie_file):
+              strategies.append(("cookies: web_safari", "web_safari", clean_cookie_file))
+              strategies.append(("cookies: default", None, clean_cookie_file))
+              strategies.append(("cookies: web,web_creator", "web,web_creator", clean_cookie_file))
+              stripped_cookie_file = os.path.join(os.getcwd(), "yt_cookies_stripped.txt")
+              if sanitize_cookie_file(cookies_file, stripped_cookie_file, strip_rolling=True):
+                  strategies.append(("stripped cookies: web_safari", "web_safari", stripped_cookie_file))
+                  strategies.append(("stripped cookies: default", None, stripped_cookie_file))
+              strategies.append(("cookies: web_embedded,mweb", "web_embedded,mweb", clean_cookie_file))
+          strategies.append(("anonymous: default", None, None))
+          strategies.append(("anonymous: web,web_creator", "web,web_creator", None))
+          strategies.append(("anonymous: ios,web", "ios,web", None))
+          strategies.append(("anonymous: web_embedded,mweb", "web_embedded,mweb", None))
+
+          accepted_path = None
+          accepted_client = None
+          actual_height = 0
+          fallbacks = []
+          last_proc = None
+
+          for idx, (label, client_list, cookie_path) in enumerate(strategies):
+              print(f"\n=== Strategy {idx + 1}/{len(strategies)}: {label} ===")
+              last_proc = run_ytdlp(client_list, cookie_path=cookie_path)
+              files = [f for f in os.listdir(".") if is_download_file(f)]
+              if not files:
+                  continue
+              candidate = os.path.join(".", max(files, key=lambda f: os.path.getsize(f)))
+              if is_audio:
+                  accepted_path, accepted_client = candidate, client_list
+                  break
+              seen_height = probe_height(candidate)
+              if seen_height >= height:
+                  accepted_path, accepted_client, actual_height = candidate, client_list, seen_height
+                  print(f"Quality OK: real {seen_height}p >= requested {height}p. Stopping strategy chain.")
+                  break
+              print(f"::warning::Client [{client_list or 'default'}] delivered only {seen_height or 'unknown'}p, requested {height}p. Trying next strategy...")
+              parked = os.path.join(".", f"fallback_{len(fallbacks) + 1}{os.path.splitext(candidate)[1]}")
+              shutil.move(candidate, parked)
+              fallbacks.append((parked, seen_height, client_list))
+
+          if accepted_path is None and fallbacks:
+              fallbacks.sort(key=lambda t: (t[1], os.path.getsize(t[0])), reverse=True)
+              accepted_path, actual_height, accepted_client = fallbacks[0]
+              which = f" (client: {accepted_client})" if accepted_client else ""
+              print(f"::warning::Requested {height}p but only {actual_height or 'unknown'}p{which} could be downloaded. The file is named with its real resolution.")
+              print(f"::notice::Tip: add YouTube cookies in OctoFetch Settings to unlock higher resolutions, or the video itself may not offer {height}p.")
+
+          if accepted_path is None:
+              err = (last_proc.stderr or "").strip() if last_proc else "No output from downloader"
+              tail = "\n".join(err.splitlines()[-14:])
+              if "Sign in to confirm you" in err or "confirm you are not a bot" in err:
+                  die("YouTube asked to confirm you are not a bot (HTTP 403).", tail)
+              if "Private video" in err:
+                  die("This video is private.", tail)
+              if "members-only" in err.lower() or "join this channel" in err.lower():
+                  die("This video is members-only. Supply valid YouTube cookies in Settings.", tail)
+              if "age-restricted" in err.lower() or "confirm your age" in err.lower():
+                  die("This video is age-restricted. Supply valid YouTube cookies in Settings.", tail)
+              if "403" in err:
+                  die("YouTube refused to serve the video stream (HTTP 403).", tail)
+              die("Downloader could not fetch this video.", tail)
+
+          path = accepted_path
+          size_mb = os.path.getsize(path) / 1048576
+
+          if size_mb < 0.01:
+              die(f"The downloaded file is empty ({path}).")
+
+          if CHUNK_LIMIT_MB and size_mb > CHUNK_LIMIT_MB:
+              die(
+                  f"The video is {size_mb:.0f} MB, over the {CHUNK_LIMIT_MB} MB limit this "
+                  f"server allows. Choose a lower quality."
+              )
+
+          title = initial_title
+          if not title:
+              title_client = accepted_client or "web_safari"
+              try:
+                  probe_cmd = [
+                      sys.executable, "-m", "yt_dlp", "--no-playlist", "--no-warnings",
+                      "--js-runtimes", "deno", "--js-runtimes", "node", "--remote-components", "ejs:github",
+                      "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
+                  ]
+                  if accepted_client:
+                      probe_cmd += ["--extractor-args", f"youtube:player_client={title_client}"]
+                  if clean_cookie_file and os.path.exists(clean_cookie_file):
+                      probe_cmd += ["--cookies", clean_cookie_file]
+                  probe_cmd += ["--skip-download", "--print", "%(title)s", URL]
+                  probe = subprocess.run(
+                      probe_cmd,
+                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+                  if probe.returncode == 0 and probe.stdout.strip():
+                      title = probe.stdout.strip().splitlines()[0]
+              except Exception:
+                  pass
+
+          base_name = os.path.splitext(os.path.basename(path))[0]
+          if not title or title.startswith("fallback_") or title.startswith("download"):
+              if base_name and not base_name.startswith("fallback_") and not base_name.startswith("download"):
+                  title = base_name
+              else:
+                  title = f"video_{video_id}"
+
+          if is_audio:
+              suffix = final_ext
+          else:
+              real_height = probe_height(path) or actual_height
+              suffix = f"{real_height}p" if real_height else f"{height}p"
+
+          clean = re.sub(r"[^\w\-_()\[\]]", "_", title.replace(" ", "_"), flags=re.UNICODE)
+          clean = re.sub(r"_+", "_", clean).strip("_")[:70] or video_id
+          clean = clean.lstrip("-")
+          filename = f"{clean}_{video_id}_{suffix}.{final_ext}"
+
+          target_dir = os.path.abspath("output_media")
+          os.makedirs(target_dir, exist_ok=True)
+          dest_path = os.path.join(target_dir, filename)
+
+          if os.path.exists(dest_path):
+              os.remove(dest_path)
+          shutil.move(path, dest_path)
+
+          print(f"Downloaded and placed in output_media: {filename} ({size_mb:.1f} MB)")
+
+          for f in os.listdir("."):
+              if f.startswith("fallback_") and os.path.isfile(f):
+                  try:
+                      os.remove(f)
+                  except OSError:
+                      pass
+
+          for tmp_c in [cookies_file, clean_cookie_file, os.path.join(os.getcwd(), "yt_cookies_stripped.txt")]:
+              if tmp_c and os.path.exists(tmp_c):
+                  try:
+                      os.remove(tmp_c)
+                  except OSError:
+                      pass
+          print("Cleaned up temporary cookie and fallback files.")
           PYEOF
-          cd ..
 
       - name: Upload Media to Telegram
         env:
@@ -340,6 +633,8 @@ jobs:
           PYEOF
 
       - name: Commit links manifest
+        env:
+          FOLDER: ${{ github.event.inputs.folder_name }}
         run: |
           set -euo pipefail
 
