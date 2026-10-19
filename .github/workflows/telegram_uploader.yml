@@ -1,4 +1,4 @@
-# OctoFetch-Telegram-Version: 2
+# OctoFetch-Telegram-Version: 3
 
 name: 'Telegram Upload Engine'
 
@@ -93,7 +93,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends aria2 python3 python3-pip
-          pip3 install --quiet telethon cryptg
+          pip3 install --quiet telethon cryptg FastTelethonhelper
 
       - name: Download source file
         env:
@@ -212,8 +212,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 - <<'PYEOF'
+          python3 -u - <<'PYEOF'
           import os, sys, glob, json, math, base64, asyncio
+
+          try:
+              import FastTelethonhelper
+              has_fast = True
+          except Exception:
+              has_fast = False
 
           folder = os.environ.get("FOLDER")
           target_chat = os.environ.get("TARGET", "").strip()
@@ -238,7 +244,7 @@ jobs:
           for fpath in files:
               size = os.path.getsize(fpath)
               if size > split_limit_bytes:
-                  print(f"File {fpath} ({size / (1024*1024):.1f} MB) exceeds {split_limit_mb} MB limit. Splitting into parts...")
+                  print(f"File {fpath} ({size / (1024*1024):.1f} MB) exceeds {split_limit_mb} MB limit. Splitting into parts...", flush=True)
                   base_name = os.path.basename(fpath)
                   part_num = 1
                   with open(fpath, "rb") as src:
@@ -255,7 +261,7 @@ jobs:
               else:
                   files_to_upload.append(fpath)
 
-          print(f"Prepared {len(files_to_upload)} file(s) for Telegram upload.")
+          print(f"Prepared {len(files_to_upload)} file(s) for Telegram upload.", flush=True)
 
           async def main():
               from telethon import TelegramClient
@@ -282,7 +288,7 @@ jobs:
                   await client.connect()
                   if not await client.is_user_authorized():
                       if bot_token:
-                          print("User session not authorized; falling back to bot token")
+                          print("User session not authorized; falling back to bot token", flush=True)
                           await client.start(bot_token=bot_token)
                       else:
                           print("::error::Telegram client could not authorize session.", file=sys.stderr)
@@ -310,22 +316,46 @@ jobs:
                   if total_count > 1:
                       cap += f" [{idx}/{total_count}]"
 
-                  print(f"Uploading [{idx}/{total_count}]: {fname} ({fsize / (1024*1024):.1f} MB)...")
-
                   last_reported_pct = [0]
                   def callback(uploaded, total):
                       if total > 0:
                           pct = int((uploaded / total) * 100)
-                          if pct >= last_reported_pct[0] + 20 or pct == 100:
+                          if pct >= last_reported_pct[0] + 10 or pct == 100:
                               last_reported_pct[0] = pct
-                              print(f"  > Progress: {pct}% ({uploaded // (1024*1024)}/{total // (1024*1024)} MB)")
+                              print(f"  > Progress: {pct}% ({uploaded // (1024*1024)}/{total // (1024*1024)} MB)", flush=True)
 
-                  msg = await client.send_file(
-                      entity,
-                      fpath,
-                      caption=cap,
-                      progress_callback=callback
-                  )
+                  msg = None
+                  if has_fast:
+                      print(f"Uploading [{idx}/{total_count}] with multi-connection engine: {fname} ({fsize / (1024*1024):.1f} MB)...", flush=True)
+                      try:
+                          with open(fpath, "rb") as f:
+                              uploaded_file = await FastTelethonhelper.upload_file(
+                                  client=client,
+                                  file=f,
+                                  name=fname,
+                                  progress_callback=callback
+                              )
+                          msg = await client.send_file(
+                              entity,
+                              uploaded_file,
+                              caption=cap
+                          )
+                      except Exception as ex:
+                          print(f"Fast upload fallback: {ex}, using standard send_file...", flush=True)
+                          msg = await client.send_file(
+                              entity,
+                              fpath,
+                              caption=cap,
+                              progress_callback=callback
+                          )
+                  else:
+                      print(f"Uploading [{idx}/{total_count}]: {fname} ({fsize / (1024*1024):.1f} MB)...", flush=True)
+                      msg = await client.send_file(
+                          entity,
+                          fpath,
+                          caption=cap,
+                          progress_callback=callback
+                      )
 
                   post_url = ""
                   try:
@@ -343,7 +373,7 @@ jobs:
                       "message_id": msg.id,
                       "url": post_url or f"Telegram: message {msg.id}"
                   })
-                  print(f"Uploaded: {fname} -> Message ID {msg.id}")
+                  print(f"Uploaded: {fname} -> Message ID {msg.id}", flush=True)
 
               await client.disconnect()
 
