@@ -1,4 +1,4 @@
-# OctoFetch-Telegram-Version: 1
+# OctoFetch-Telegram-Version: 2
 
 name: 'Telegram Upload Engine'
 
@@ -81,10 +81,12 @@ jobs:
       - name: Checkout (sparse, fast)
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 1
           filter: blob:none
           sparse-checkout: |
             .github
+            .octofetch
           sparse-checkout-cone-mode: false
 
       - name: Install dependencies
@@ -354,6 +356,8 @@ jobs:
           PYEOF
 
       - name: Commit links manifest
+        env:
+          FOLDER: ${{ github.event.inputs.folder_name }}
         run: |
           set -euo pipefail
 
