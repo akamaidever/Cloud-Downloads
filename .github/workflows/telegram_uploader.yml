@@ -1,0 +1,385 @@
+# OctoFetch-Telegram-Version: 1
+
+name: 'Telegram Upload Engine'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'Direct file URL to download'
+        required: true
+        type: string
+      folder_name:
+        description: 'Folder identifier used for the links manifest path'
+        required: true
+        type: string
+      safe_mode:
+        description: 'Replace the source filename with the sanitised folder name'
+        required: true
+        type: string
+      telegram_target:
+        description: 'Destination channel/group ID or username (e.g. @mychannel or -1001234567890)'
+        required: true
+        type: string
+      telegram_worker_type:
+        description: 'bot or account'
+        required: false
+        type: string
+        default: 'bot'
+      telegram_bot_token:
+        description: 'Bot token (if worker_type is bot)'
+        required: false
+        type: string
+        default: ''
+      telegram_session:
+        description: 'Base64-encoded user session (if worker_type is account)'
+        required: false
+        type: string
+        default: ''
+      telegram_api_id:
+        description: 'Telegram API ID'
+        required: false
+        type: string
+        default: '16612056'
+      telegram_api_hash:
+        description: 'Telegram API Hash'
+        required: false
+        type: string
+        default: 'ae32caf162207865ff93b9b931b2ba54'
+      telegram_caption:
+        description: 'Custom message caption template'
+        required: false
+        type: string
+        default: ''
+      telegram_split_limit_mb:
+        description: 'Maximum file size in MB before splitting (e.g. 2000 for bots/standard, 4000 for premium)'
+        required: false
+        type: string
+        default: '2000'
+      telegram_file_name:
+        description: 'Optional explicit destination filename'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tg-${{ github.event.inputs.folder_name }}
+  cancel-in-progress: false
+
+jobs:
+  telegram-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+
+      - name: Checkout (sparse, fast)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            .github
+          sparse-checkout-cone-mode: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends aria2 python3 python3-pip
+          pip3 install --quiet telethon cryptg
+
+      - name: Download source file
+        env:
+          URL: ${{ github.event.inputs.file_url }}
+          FOLDER_INPUT: ${{ github.event.inputs.folder_name }}
+          SAFE_MODE: ${{ github.event.inputs.safe_mode }}
+          OVERRIDE_NAME: ${{ github.event.inputs.telegram_file_name }}
+        run: |
+          set -euo pipefail
+
+          FOLDER=$(printf '%s' "$FOLDER_INPUT" | tr -c 'A-Za-z0-9._-' '_')
+          if [ ${#FOLDER} -gt 100 ]; then
+            FOLDER="${FOLDER:0:100}"
+          fi
+          if [ -z "$FOLDER" ]; then
+            FOLDER="DL_$(date +%Y%m%d%H%M%S)"
+          fi
+          echo "FOLDER=$FOLDER" >> "$GITHUB_ENV"
+
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+          probe_content_disposition() {
+            python3 - "$1" "$UA" 2>/dev/null <<'PYEOF'
+          import sys, re, urllib.request, urllib.parse, ssl
+          url, ua = sys.argv[1], sys.argv[2]
+          ctx = ssl.create_default_context()
+          cd = ""
+          for method in ("HEAD", "GET"):
+              try:
+                  headers = {"User-Agent": ua}
+                  if method == "GET":
+                      headers["Range"] = "bytes=0-0"
+                  req = urllib.request.Request(url, headers=headers, method=method)
+                  with urllib.request.urlopen(req, timeout=12, context=ctx) as r:
+                      cd = r.headers.get("Content-Disposition") or ""
+                      if cd:
+                          break
+              except Exception:
+                  pass
+          if cd:
+              m = re.search(r'''filename\*\s*=\s*UTF-8''([^;\r\n]+)''', cd, re.IGNORECASE)
+              if m:
+                  print(urllib.parse.unquote(m.group(1).strip().strip('"\'')))
+                  sys.exit(0)
+              m = re.search(r'''filename\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;\r\n]+))''', cd, re.IGNORECASE)
+              if m:
+                  name = m.group(1) or m.group(2) or m.group(3) or ""
+                  print(name.strip().strip('"\''))
+                  sys.exit(0)
+          PYEOF
+          }
+
+          INFERRED_NAME=""
+          if [ -n "$OVERRIDE_NAME" ]; then
+            INFERRED_NAME="$OVERRIDE_NAME"
+          else
+            CD_NAME=$(probe_content_disposition "$URL" || true)
+            if [ -n "$CD_NAME" ]; then
+              INFERRED_NAME="$CD_NAME"
+            fi
+          fi
+
+          mkdir -p source_file
+          cd source_file
+
+          if [ -n "$INFERRED_NAME" ] && [ "$SAFE_MODE" != "true" ]; then
+            aria2c -x 16 -s 16 -k 1M \
+              --user-agent="$UA" \
+              --check-certificate=false \
+              --allow-overwrite=true \
+              --auto-file-renaming=false \
+              --out="$INFERRED_NAME" \
+              "$URL" || curl -k -L -A "$UA" -o "$INFERRED_NAME" "$URL"
+          else
+            aria2c -x 16 -s 16 -k 1M \
+              --user-agent="$UA" \
+              --check-certificate=false \
+              --allow-overwrite=true \
+              --auto-file-renaming=false \
+              --content-disposition-default-utf8=true \
+              "$URL" || curl -k -L -A "$UA" -O -J "$URL"
+          fi
+
+          FILE_COUNT=$(find . -maxdepth 1 -type f | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::Download failed - no file produced."
+            exit 1
+          fi
+
+          SRC=$(find . -maxdepth 1 -type f | head -n 1)
+          EXT="${SRC##*.}"
+          if [ "$EXT" = "$SRC" ]; then EXT=""; else EXT=".$EXT"; fi
+
+          if [ "$SAFE_MODE" = "true" ]; then
+            DEST="${FOLDER}${EXT}"
+            if [ "$SRC" != "./$DEST" ]; then
+              mv "$SRC" "$DEST"
+            fi
+          fi
+
+          echo "Downloaded file(s):"
+          ls -lh
+          cd ..
+
+      - name: Upload to Telegram
+        env:
+          FOLDER: ${{ env.FOLDER }}
+          TARGET: ${{ github.event.inputs.telegram_target }}
+          WORKER_TYPE: ${{ github.event.inputs.telegram_worker_type }}
+          BOT_TOKEN: ${{ github.event.inputs.telegram_bot_token }}
+          SESSION_DATA: ${{ github.event.inputs.telegram_session }}
+          API_ID: ${{ github.event.inputs.telegram_api_id }}
+          API_HASH: ${{ github.event.inputs.telegram_api_hash }}
+          CAPTION: ${{ github.event.inputs.telegram_caption }}
+          SPLIT_LIMIT_MB: ${{ github.event.inputs.telegram_split_limit_mb }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYEOF'
+          import os, sys, glob, json, math, base64, asyncio
+
+          folder = os.environ.get("FOLDER")
+          target_chat = os.environ.get("TARGET", "").strip()
+          worker_type = os.environ.get("WORKER_TYPE", "bot").lower()
+          bot_token = os.environ.get("BOT_TOKEN", "").strip()
+          session_data = os.environ.get("SESSION_DATA", "").strip()
+          api_id = int(os.environ.get("API_ID", "16612056"))
+          api_hash = os.environ.get("API_HASH", "ae32caf162207865ff93b9b931b2ba54")
+          caption_tmpl = os.environ.get("CAPTION", "").strip()
+          split_limit_mb = int(os.environ.get("SPLIT_LIMIT_MB", "2000"))
+          split_limit_bytes = split_limit_mb * 1024 * 1024
+
+          # Find downloaded files
+          files = sorted(glob.glob("source_file/*"))
+          files = [f for f in files if os.path.isfile(f)]
+          if not files:
+              print("::error::No files to upload", file=sys.stderr)
+              sys.exit(1)
+
+          # Auto-split files larger than split_limit_bytes
+          files_to_upload = []
+          for fpath in files:
+              size = os.path.getsize(fpath)
+              if size > split_limit_bytes:
+                  print(f"File {fpath} ({size / (1024*1024):.1f} MB) exceeds {split_limit_mb} MB limit. Splitting into parts...")
+                  base_name = os.path.basename(fpath)
+                  part_num = 1
+                  with open(fpath, "rb") as src:
+                      while True:
+                          chunk = src.read(split_limit_bytes)
+                          if not chunk:
+                              break
+                          part_path = f"source_file/{base_name}.part{part_num:03d}"
+                          with open(part_path, "wb") as dst:
+                              dst.write(chunk)
+                          files_to_upload.append(part_path)
+                          part_num += 1
+                  os.remove(fpath)
+              else:
+                  files_to_upload.append(fpath)
+
+          print(f"Prepared {len(files_to_upload)} file(s) for Telegram upload.")
+
+          async def main():
+              from telethon import TelegramClient
+              from telethon.sessions import StringSession
+
+              session_to_use = None
+              if session_data:
+                  try:
+                      # If it's a string session
+                      session_to_use = StringSession(session_data)
+                  except Exception:
+                      # Otherwise save session file
+                      sess_bytes = base64.b64decode(session_data)
+                      with open("temp_account.session", "wb") as sf:
+                          sf.write(sess_bytes)
+                      session_to_use = "temp_account"
+              else:
+                  session_to_use = StringSession()
+
+              client = TelegramClient(session_to_use, api_id, api_hash)
+              if worker_type == "bot" and bot_token:
+                  await client.start(bot_token=bot_token)
+              else:
+                  await client.connect()
+                  if not await client.is_user_authorized():
+                      if bot_token:
+                          print("User session not authorized; falling back to bot token")
+                          await client.start(bot_token=bot_token)
+                      else:
+                          print("::error::Telegram client could not authorize session.", file=sys.stderr)
+                          sys.exit(1)
+
+              # Resolve entity (handle numerical ID and usernames)
+              entity = None
+              try:
+                  if target_chat.startswith("-") or target_chat.isdigit():
+                      entity = await client.get_entity(int(target_chat))
+                  else:
+                      clean_target = target_chat.lstrip("@").split("/")[-1]
+                      entity = await client.get_entity(clean_target)
+              except Exception as e:
+                  print(f"::error::Could not resolve Telegram target '{target_chat}': {e}", file=sys.stderr)
+                  sys.exit(1)
+
+              results = []
+              total_count = len(files_to_upload)
+
+              for idx, fpath in enumerate(files_to_upload, start=1):
+                  fname = os.path.basename(fpath)
+                  fsize = os.path.getsize(fpath)
+                  cap = caption_tmpl.replace("{name}", fname).replace("{file}", fname) if caption_tmpl else fname
+                  if total_count > 1:
+                      cap += f" [{idx}/{total_count}]"
+
+                  print(f"Uploading [{idx}/{total_count}]: {fname} ({fsize / (1024*1024):.1f} MB)...")
+
+                  last_reported_pct = [0]
+                  def callback(uploaded, total):
+                      if total > 0:
+                          pct = int((uploaded / total) * 100)
+                          if pct >= last_reported_pct[0] + 20 or pct == 100:
+                              last_reported_pct[0] = pct
+                              print(f"  > Progress: {pct}% ({uploaded // (1024*1024)}/{total // (1024*1024)} MB)")
+
+                  msg = await client.send_file(
+                      entity,
+                      fpath,
+                      caption=cap,
+                      progress_callback=callback
+                  )
+
+                  post_url = ""
+                  try:
+                      if hasattr(entity, "username") and entity.username:
+                          post_url = f"https://t.me/{entity.username}/{msg.id}"
+                      elif target_chat.startswith("-100"):
+                          clean_id = target_chat[4:]
+                          post_url = f"https://t.me/c/{clean_id}/{msg.id}"
+                  except Exception:
+                      pass
+
+                  results.append({
+                      "name": fname,
+                      "size": fsize,
+                      "message_id": msg.id,
+                      "url": post_url or f"Telegram: message {msg.id}"
+                  })
+                  print(f"Uploaded: {fname} -> Message ID {msg.id}")
+
+              await client.disconnect()
+
+              out_dir = os.path.join(".octofetch", "telegram", folder)
+              os.makedirs(out_dir, exist_ok=True)
+              with open(os.path.join(out_dir, "links.json"), "w", encoding="utf-8") as f:
+                  json.dump({"destination": "telegram", "target": target_chat, "files": results}, f, indent=2)
+
+          asyncio.run(main())
+          PYEOF
+
+      - name: Commit links manifest
+        run: |
+          set -euo pipefail
+
+          git config user.name "OctoFetchBot"
+          git config user.email "bot@octofetch.local"
+          git config advice.updateSparsePath false
+
+          git add --sparse -- ".octofetch/telegram/$FOLDER/links.json"
+          if git diff --cached --quiet; then
+            echo "No links.json staged."
+            exit 0
+          fi
+          git commit -m "Telegram: $FOLDER links manifest"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin >/dev/null 2>&1 || true
+            git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)" >/dev/null 2>&1 || true
+            if git push; then
+              echo "Manifest pushed on attempt $attempt"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::Failed to push links.json after 5 attempts"
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf source_file 2>/dev/null || true
