@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeTelegram-Version: 7
+# OctoFetch-YouTubeTelegram-Version: 9
 
 name: 'YouTube → Telegram Engine'
 
@@ -552,7 +552,7 @@ jobs:
           target_chat = os.environ.get("TARGET", "").strip()
           worker_type = os.environ.get("WORKER_TYPE", "bot").lower()
           caption_tmpl = os.environ.get("CAPTION", "").strip()
-          split_limit_mb = int(os.environ.get("SPLIT_LIMIT_MB", "2000"))
+          split_limit_mb = min(int(os.environ.get("SPLIT_LIMIT_MB", "2000")), 2000)
 
           # Securely load credentials from isolated temporary file
           tmp_dir = os.environ.get("RUNNER_TEMP", "/tmp")
@@ -643,31 +643,20 @@ jobs:
                   with open(os.path.join(out_dir, "links.json"), "w", encoding="utf-8") as f:
                       json.dump(data, f, indent=2)
 
-              session_to_use = None
-              if session_data:
-                  try:
-                      session_to_use = StringSession(session_data)
-                  except Exception:
-                      sess_bytes = base64.b64decode(session_data)
-                      with open("temp_account.session", "wb") as sf:
-                          sf.write(sess_bytes)
-                      session_to_use = "temp_account"
-              else:
-                  session_to_use = StringSession()
+              if not bot_token:
+                  err = "No Telegram bot token found. Please add a Bot Token in OctoFetch Settings."
+                  print(f"::error::{err}", file=sys.stderr)
+                  write_manifest([], err)
+                  sys.exit(1)
 
-              client = TelegramClient(session_to_use, api_id, api_hash)
-              if worker_type == "bot" and bot_token:
+              try:
+                  client = TelegramClient(StringSession(), api_id, api_hash)
                   await client.start(bot_token=bot_token)
-              else:
-                  await client.connect()
-                  if not await client.is_user_authorized():
-                      if bot_token:
-                          await client.start(bot_token=bot_token)
-                      else:
-                          err = "Telegram client could not authorize session."
-                          print(f"::error::{err}", file=sys.stderr)
-                          write_manifest([], err)
-                          sys.exit(1)
+              except Exception as e:
+                  err = f"Telegram Bot authentication failed: {e}. Check bot token in OctoFetch Settings."
+                  print(f"::error::{err}", file=sys.stderr)
+                  write_manifest([], err)
+                  sys.exit(1)
 
               entity = None
               try:
