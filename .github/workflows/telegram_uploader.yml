@@ -1,4 +1,4 @@
-# OctoFetch-Telegram-Version: 5
+# OctoFetch-Telegram-Version: 6
 
 name: 'Telegram Upload Engine'
 
@@ -336,7 +336,7 @@ jobs:
                   ChatWriteForbiddenError,
                   ChannelPrivateError,
                   UserNotParticipantError,
-                  FilePartsTooBigError,
+                  FilePartTooBigError,
                   FloodWaitError
               )
 
@@ -475,7 +475,7 @@ jobs:
                           print(f"::error::{err}", file=sys.stderr)
                           write_manifest(results, err)
                           sys.exit(1)
-                      except FilePartsTooBigError:
+                      except FilePartTooBigError:
                           err = f"File size limit exceeded for '{fname}'. Ensure auto-split is enabled in Settings."
                           print(f"::error::{err}", file=sys.stderr)
                           write_manifest(results, err)
