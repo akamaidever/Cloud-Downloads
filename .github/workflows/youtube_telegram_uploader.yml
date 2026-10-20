@@ -1,4 +1,4 @@
-# OctoFetch-YouTubeTelegram-Version: 6
+# OctoFetch-YouTubeTelegram-Version: 7
 
 name: 'YouTube → Telegram Engine'
 
@@ -88,6 +88,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+
+      - name: Secure & mask credentials
+        run: |
+          set +x
+          python3 - <<'PYEOF'
+          import os, json, sys
+
+          event_path = os.environ.get("GITHUB_EVENT_PATH")
+          inputs = {}
+          if event_path and os.path.exists(event_path):
+              try:
+                  with open(event_path, "r", encoding="utf-8") as f:
+                      event = json.load(f)
+                  inputs = event.get("inputs", {})
+              except Exception:
+                  pass
+
+          # 1. Register secrets with GitHub Actions mask engine (redacts to *** in ALL logs)
+          for key in ["telegram_bot_token", "telegram_session", "telegram_api_hash", "telegram_api_id", "cookies"]:
+              val = str(inputs.get(key, "")).strip()
+              if val and len(val) > 2:
+                  print(f"::add-mask::{val}")
+
+          # 2. Write to isolated, protected credentials file in runner temp directory
+          tmp_dir = os.environ.get("RUNNER_TEMP", "/tmp")
+          creds_file = os.path.join(tmp_dir, ".telegram_creds.json")
+          creds = {
+              "bot_token": str(inputs.get("telegram_bot_token", "")).strip(),
+              "session_data": str(inputs.get("telegram_session", "")).strip(),
+              "api_id": str(inputs.get("telegram_api_id", "16612056")).strip(),
+              "api_hash": str(inputs.get("telegram_api_hash", "ae32caf162207865ff93b9b931b2ba54")).strip(),
+          }
+          with open(creds_file, "w", encoding="utf-8") as f:
+              json.dump(creds, f)
+          os.chmod(creds_file, 0o600)
+          print("Sensitive credentials and cookies registered with runner mask engine.")
+          PYEOF
 
       - name: Checkout (sparse, fast)
         uses: actions/checkout@v4
@@ -284,7 +321,6 @@ jobs:
                   postprocess = []
           else:
               selector = (
-                  f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
                   f"bestvideo[height<={height}]+bestaudio/"
                   f"best[height<={height}]/"
                   f"bestvideo+bestaudio/"
@@ -300,9 +336,8 @@ jobs:
                   "--retries", "5",
                   "--fragment-retries", "5",
                   "--socket-timeout", "30",
+                  "--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416",
               ]
-              if client_list != "visionos":
-                  c += ["--extractor-args", "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"]
               if client_list:
                   c += ["--extractor-args", f"youtube:player_client={client_list}"]
               c += [
@@ -352,12 +387,6 @@ jobs:
               return 0
 
           strategies = []
-          # When user requests 4K (2160p) or 1440p:
-          # Standard web and safari clients cap at 1080p due to codec and SABR restrictions.
-          # The visionos player client provides native 4K (2160p) and 1440p HLS streams.
-          if height > 1080:
-              strategies.append(("anonymous: visionos", "visionos", None))
-
           if clean_cookie_file and os.path.exists(clean_cookie_file):
               strategies.append(("cookies: web_safari", "web_safari", clean_cookie_file))
               strategies.append(("cookies: default", None, clean_cookie_file))
@@ -367,11 +396,6 @@ jobs:
                   strategies.append(("stripped cookies: web_safari", "web_safari", stripped_cookie_file))
                   strategies.append(("stripped cookies: default", None, stripped_cookie_file))
               strategies.append(("cookies: web_embedded,mweb", "web_embedded,mweb", clean_cookie_file))
-
-          # For standard resolutions (<=1080p) or as fallback when cookies are present
-          if height <= 1080:
-              strategies.append(("anonymous: visionos", "visionos", None))
-
           strategies.append(("anonymous: default", None, None))
           strategies.append(("anonymous: web,web_creator", "web,web_creator", None))
           strategies.append(("anonymous: ios,web", "ios,web", None))
@@ -510,10 +534,6 @@ jobs:
           FOLDER: ${{ github.event.inputs.folder_name }}
           TARGET: ${{ github.event.inputs.telegram_target }}
           WORKER_TYPE: ${{ github.event.inputs.telegram_worker_type }}
-          BOT_TOKEN: ${{ github.event.inputs.telegram_bot_token }}
-          SESSION_DATA: ${{ github.event.inputs.telegram_session }}
-          API_ID: ${{ github.event.inputs.telegram_api_id }}
-          API_HASH: ${{ github.event.inputs.telegram_api_hash }}
           CAPTION: ${{ github.event.inputs.telegram_caption }}
           SPLIT_LIMIT_MB: ${{ github.event.inputs.telegram_split_limit_mb }}
         run: |
@@ -531,12 +551,31 @@ jobs:
           folder = os.environ.get("FOLDER")
           target_chat = os.environ.get("TARGET", "").strip()
           worker_type = os.environ.get("WORKER_TYPE", "bot").lower()
-          bot_token = os.environ.get("BOT_TOKEN", "").strip()
-          session_data = os.environ.get("SESSION_DATA", "").strip()
-          api_id = int(os.environ.get("API_ID", "16612056"))
-          api_hash = os.environ.get("API_HASH", "ae32caf162207865ff93b9b931b2ba54")
           caption_tmpl = os.environ.get("CAPTION", "").strip()
           split_limit_mb = int(os.environ.get("SPLIT_LIMIT_MB", "2000"))
+
+          # Securely load credentials from isolated temporary file
+          tmp_dir = os.environ.get("RUNNER_TEMP", "/tmp")
+          creds_file = os.path.join(tmp_dir, ".telegram_creds.json")
+          bot_token = ""
+          session_data = ""
+          api_id = 16612056
+          api_hash = "ae32caf162207865ff93b9b931b2ba54"
+
+          if os.path.exists(creds_file):
+              try:
+                  with open(creds_file, "r", encoding="utf-8") as f:
+                      creds = json.load(f)
+                  bot_token = creds.get("bot_token", "").strip()
+                  session_data = creds.get("session_data", "").strip()
+                  raw_id = creds.get("api_id", "").strip()
+                  if raw_id:
+                      api_id = int(raw_id)
+                  raw_hash = creds.get("api_hash", "").strip()
+                  if raw_hash:
+                      api_hash = raw_hash
+              except Exception as e:
+                  print(f"::warning::Could not load credentials: {e}")
 
           # Dynamic splitting threshold & part sizing:
           # - Free account / Bot: 2 GB ceiling -> split into 1.9 GB (1900 MB) parts if > 2 GB
@@ -582,6 +621,27 @@ jobs:
           async def main():
               from telethon import TelegramClient
               from telethon.sessions import StringSession
+              from telethon.errors import (
+                  ChatAdminRequiredError,
+                  ChatWriteForbiddenError,
+                  ChannelPrivateError,
+                  UserNotParticipantError,
+                  FilePartTooBigError,
+                  FloodWaitError
+              )
+
+              def write_manifest(files_list, error_msg=None):
+                  out_dir = os.path.join(".octofetch", "telegram", folder)
+                  os.makedirs(out_dir, exist_ok=True)
+                  data = {
+                      "destination": "telegram",
+                      "target": target_chat,
+                      "files": files_list or []
+                  }
+                  if error_msg:
+                      data["error"] = error_msg
+                  with open(os.path.join(out_dir, "links.json"), "w", encoding="utf-8") as f:
+                      json.dump(data, f, indent=2)
 
               session_to_use = None
               if session_data:
@@ -604,7 +664,9 @@ jobs:
                       if bot_token:
                           await client.start(bot_token=bot_token)
                       else:
-                          print("::error::Telegram client could not authorize session.", file=sys.stderr)
+                          err = "Telegram client could not authorize session."
+                          print(f"::error::{err}", file=sys.stderr)
+                          write_manifest([], err)
                           sys.exit(1)
 
               entity = None
@@ -614,8 +676,15 @@ jobs:
                   else:
                       clean_target = target_chat.lstrip("@").split("/")[-1]
                       entity = await client.get_entity(clean_target)
+              except ChannelPrivateError:
+                  err = f"Target '{target_chat}' is private. The bot or account must be invited/added first."
+                  print(f"::error::{err}", file=sys.stderr)
+                  write_manifest([], err)
+                  sys.exit(1)
               except Exception as e:
-                  print(f"::error::Could not resolve Telegram target '{target_chat}': {e}", file=sys.stderr)
+                  err = f"Could not find or access target chat '{target_chat}': {e}. Ensure the username/ID is correct and the bot has joined."
+                  print(f"::error::{err}", file=sys.stderr)
+                  write_manifest([], err)
                   sys.exit(1)
 
               results = []
@@ -637,37 +706,75 @@ jobs:
                               print(f"  > Progress: {pct}% ({uploaded // (1024*1024)}/{total // (1024*1024)} MB)", flush=True)
 
                   msg = None
-                  if has_fast:
-                      print(f"Uploading [{idx}/{total_count}] with multi-connection engine: {fname} ({fsize / (1024*1024):.1f} MB)...", flush=True)
+                  retry_count = 0
+                  max_retries = 3
+                  while retry_count < max_retries:
                       try:
-                          with open(fpath, "rb") as f:
-                              uploaded_file = await FastTelethonhelper.upload_file(
-                                  client=client,
-                                  file=f,
-                                  name=fname,
+                          if has_fast:
+                              print(f"Uploading [{idx}/{total_count}] with multi-connection engine: {fname} ({fsize / (1024*1024):.1f} MB)...", flush=True)
+                              try:
+                                  with open(fpath, "rb") as f:
+                                      uploaded_file = await FastTelethonhelper.upload_file(
+                                          client=client,
+                                          file=f,
+                                          name=fname,
+                                          progress_callback=callback
+                                      )
+                                  msg = await client.send_file(
+                                      entity,
+                                      uploaded_file,
+                                      caption=cap
+                                  )
+                              except Exception as ex:
+                                  print(f"Fast upload fallback: {ex}, using standard send_file...", flush=True)
+                                  msg = await client.send_file(
+                                      entity,
+                                      fpath,
+                                      caption=cap,
+                                      progress_callback=callback
+                                  )
+                          else:
+                              print(f"Uploading [{idx}/{total_count}]: {fname} ({fsize / (1024*1024):.1f} MB)...", flush=True)
+                              msg = await client.send_file(
+                                  entity,
+                                  fpath,
+                                  caption=cap,
                                   progress_callback=callback
                               )
-                          msg = await client.send_file(
-                              entity,
-                              uploaded_file,
-                              caption=cap
-                          )
+                          break
+                      except FloodWaitError as fwe:
+                          print(f"Telegram FloodWait: waiting {fwe.seconds} seconds...", flush=True)
+                          if fwe.seconds > 180:
+                              err = f"Telegram rate limit: FloodWait of {fwe.seconds}s required. Upload aborted."
+                              print(f"::error::{err}", file=sys.stderr)
+                              write_manifest(results, err)
+                              sys.exit(1)
+                          await asyncio.sleep(fwe.seconds + 1)
+                          retry_count += 1
+                      except ChatAdminRequiredError:
+                          err = f"Permission error: Bot or account must be an administrator in '{target_chat}' with 'Post Messages' permission."
+                          print(f"::error::{err}", file=sys.stderr)
+                          write_manifest(results, err)
+                          sys.exit(1)
+                      except ChatWriteForbiddenError:
+                          err = f"Write forbidden: Not allowed to send messages in '{target_chat}'. Check channel permissions."
+                          print(f"::error::{err}", file=sys.stderr)
+                          write_manifest(results, err)
+                          sys.exit(1)
+                      except FilePartTooBigError:
+                          err = f"File size limit exceeded for '{fname}'. Ensure auto-split is enabled in Settings."
+                          print(f"::error::{err}", file=sys.stderr)
+                          write_manifest(results, err)
+                          sys.exit(1)
                       except Exception as ex:
-                          print(f"Fast upload fallback: {ex}, using standard send_file...", flush=True)
-                          msg = await client.send_file(
-                              entity,
-                              fpath,
-                              caption=cap,
-                              progress_callback=callback
-                          )
-                  else:
-                      print(f"Uploading [{idx}/{total_count}]: {fname} ({fsize / (1024*1024):.1f} MB)...", flush=True)
-                      msg = await client.send_file(
-                          entity,
-                          fpath,
-                          caption=cap,
-                          progress_callback=callback
-                      )
+                          retry_count += 1
+                          if retry_count >= max_retries:
+                              err = f"Failed to upload '{fname}' after {max_retries} attempts: {ex}"
+                              print(f"::error::{err}", file=sys.stderr)
+                              write_manifest(results, err)
+                              sys.exit(1)
+                          print(f"Upload attempt {retry_count} failed ({ex}). Retrying in 5 seconds...", flush=True)
+                          await asyncio.sleep(5)
 
                   post_url = ""
                   try:
@@ -688,16 +795,13 @@ jobs:
                   print(f"Uploaded: {fname} -> Message ID {msg.id}")
 
               await client.disconnect()
-
-              out_dir = os.path.join(".octofetch", "telegram", folder)
-              os.makedirs(out_dir, exist_ok=True)
-              with open(os.path.join(out_dir, "links.json"), "w", encoding="utf-8") as f:
-                  json.dump({"destination": "telegram", "target": target_chat, "files": results}, f, indent=2)
+              write_manifest(results)
 
           asyncio.run(main())
           PYEOF
 
       - name: Commit links manifest
+        if: always()
         env:
           FOLDER: ${{ github.event.inputs.folder_name }}
         run: |
