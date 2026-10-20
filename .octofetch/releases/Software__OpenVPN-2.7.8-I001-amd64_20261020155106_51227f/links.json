@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "co-releases-v1-6606",
+  "folder": "Software__OpenVPN-2.7.8-I001-amd64_20261020155106_51227f",
+  "base_name": "Software__OpenVPN-2.7.8-I001-amd64_20261020155106_51227f.msi",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/co-releases-v1-6606",
+  "files": [
+    {
+      "name": "Software__OpenVPN-2.7.8-I001-amd64_20261020155106_51227f.msi",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/co-releases-v1-6606/Software__OpenVPN-2.7.8-I001-amd64_20261020155106_51227f.msi",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/659761416",
+      "id": 659761416,
+      "size": 5885952,
+      "download_count": 0
+    }
+  ]
+}
