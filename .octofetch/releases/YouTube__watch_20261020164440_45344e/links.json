@@ -1,0 +1,19 @@
+{
+  "destination": "release",
+  "tag": "co-releases-v1-8453",
+  "folder": "YouTube__watch_20261020164440_45344e",
+  "base_name": "دسترسی_رایگان_به_DeepSeek_4_1_Flash_و_MiniMax_M3_1_ZoI9Ctyk6Wo_720p.mp4",
+  "is_split": false,
+  "part_count": 1,
+  "release_url": "https://github.com/akamaidever/Cloud-Downloads/releases/tag/co-releases-v1-8453",
+  "files": [
+    {
+      "name": "_._._DeepSeek_4_1_Flash_._MiniMax_M3_1_ZoI9Ctyk6Wo_720p.mp4",
+      "url": "https://github.com/akamaidever/Cloud-Downloads/releases/download/co-releases-v1-8453/_._._DeepSeek_4_1_Flash_._MiniMax_M3_1_ZoI9Ctyk6Wo_720p.mp4",
+      "api_url": "https://api.github.com/repos/akamaidever/Cloud-Downloads/releases/assets/659897414",
+      "id": 659897414,
+      "size": 33343779,
+      "download_count": 0
+    }
+  ]
+}
